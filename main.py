@@ -1,7 +1,9 @@
 import os
 import logging
-import threading
 import requests
+import time
+import asyncio
+import signal
 from telegram import Update
 from telegram.ext import (
     Application,
@@ -10,9 +12,6 @@ from telegram.ext import (
     ContextTypes,
     filters
 )
-from flask import Flask
-from waitress import serve
-import asyncio
 
 # Настройка логгирования
 logging.basicConfig(
@@ -67,7 +66,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.message
     user = message.from_user
-    chat = message.chat
     
     # Пропускаем сообщения без текста
     if not message.text:
@@ -96,26 +94,18 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"Ошибка обработки сообщения: {e}")
         await message.reply_text("Что-то пошло не так. Попробуйте еще раз.")
 
-# Инициализация Flask
-app = Flask(__name__)
-
-@app.route("/")
-def home():
-    return "Бот активен. Сервер работает."
-
-@app.route("/health")
-def health_check():
-    return "OK", 200
-
-def run_flask():
-    port = int(os.environ.get("PORT", 5000))
-    logger.info(f"Запуск веб-сервера на порту {port}")
-    serve(app, host="0.0.0.0", port=port)
-
-def run_bot():
-    # Создаем новый цикл событий для бота
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
+def main():
+    # Проверка переменных окружения
+    if not TOKEN:
+        logger.error("TG_TOKEN environment variable is missing!")
+        exit(1)
+    if not API_KEY:
+        logger.error("DEEPSEEK_API_KEY environment variable is missing!")
+        exit(1)
+    
+    # Задержка для завершения предыдущих инстансов
+    logger.info("Ожидание 10 секунд перед запуском...")
+    time.sleep(10)
     
     application = Application.builder().token(TOKEN).build()
     
@@ -125,27 +115,17 @@ def run_bot():
         MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message)
     )
     
-    logger.info("Бот запущен в режиме polling...")
+    # Параметры для getUpdates
+    poll_params = {
+        "timeout": 30,
+        "read_timeout": 30,
+        "connect_timeout": 30,
+        "pool_timeout": 30,
+        "drop_pending_updates": True  # Игнорировать старые сообщения
+    }
     
-    try:
-        # Запускаем бота в созданном цикле событий
-        loop.run_until_complete(application.run_polling())
-    finally:
-        # Очистка при завершении
-        loop.close()
+    logger.info("Запуск бота в режиме polling...")
+    application.run_polling(**poll_params)
 
 if __name__ == "__main__":
-    # Проверка переменных окружения
-    if not TOKEN:
-        logger.error("TG_TOKEN environment variable is missing!")
-        exit(1)
-    if not API_KEY:
-        logger.error("DEEPSEEK_API_KEY environment variable is missing!")
-        exit(1)
-    
-    # Запуск Flask в отдельном потоке
-    flask_thread = threading.Thread(target=run_flask, daemon=True)
-    flask_thread.start()
-    
-    # Запуск бота в основном потоке
-    run_bot()
+    main()
