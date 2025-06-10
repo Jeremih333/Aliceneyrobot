@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 # Загрузка конфигурации
 TOKEN = os.getenv("TG_TOKEN")
 API_KEY = os.getenv("DEEPSEEK_API_KEY")
-BOT_USERNAME = "@your_bot_username"  # Замените на юзернейм бота
+BOT_USERNAME = "@aliceneyrobot"
 
 # Загрузка персонажа
 with open("persona.txt", "r") as f:
