@@ -48,7 +48,7 @@ def query_deepseek(prompt: str) -> str:
             {"role": "user", "content": prompt}
         ],
         "temperature": 0.7,
-        "max_tokens": 200
+        "max_tokens": 400
     }
     
     try:
