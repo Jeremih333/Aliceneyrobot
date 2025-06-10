@@ -3,7 +3,6 @@ import logging
 import requests
 import time
 import asyncio
-import signal
 from telegram import Update
 from telegram.ext import (
     Application,
@@ -33,15 +32,17 @@ except Exception as e:
     logger.error(f"Error loading persona: {e}")
     PERSONA = "Ты полезный ассистент в Telegram группе. Отвечай кратко и по делу."
 
-# API DeepSeek
+# API DeepSeek через OpenRouter
 def query_deepseek(prompt: str) -> str:
-    url = "https://api.deepseek.com/v1/chat/completions"
+    url = "https://openrouter.ai/api/v1/chat/completions"
     headers = {
         "Authorization": f"Bearer {API_KEY}",
-        "Content-Type": "application/json"
+        "Content-Type": "application/json",
+        "HTTP-Referer": "https://render.com",  # Обязательный заголовок для OpenRouter
+        "X-Title": "TelegramBot"               # Обязательный заголовок для OpenRouter
     }
     payload = {
-        "model": "deepseek-chat",
+        "model": "deepseek/deepseek-chat",  # Исправленный идентификатор модели
         "messages": [
             {"role": "system", "content": PERSONA},
             {"role": "user", "content": prompt}
@@ -51,12 +52,14 @@ def query_deepseek(prompt: str) -> str:
     }
     
     try:
-        response = requests.post(url, json=payload, headers=headers, timeout=10)
+        response = requests.post(url, json=payload, headers=headers, timeout=30)
         response.raise_for_status()
         return response.json()["choices"][0]["message"]["content"]
+    except requests.exceptions.HTTPError as e:
+        logger.error(f"DeepSeek API HTTP error: {e.response.text}")
     except Exception as e:
         logger.error(f"DeepSeek API error: {e}")
-        return "Произошла ошибка при обработке запроса. Попробуйте позже."
+    return "Произошла ошибка при обработке запроса. Попробуйте позже."
 
 # Обработчики команд
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -74,7 +77,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Проверка условий активации
     is_reply_to_bot = (
         message.reply_to_message and 
-        message.reply_to_message.from_user.username == BOT_USERNAME.lstrip("@")
+        message.reply_to_message.from_user.username and
+        message.reply_to_message.from_user.username.lower() == BOT_USERNAME.lstrip("@").lower()
     )
     is_mention = BOT_USERNAME.lower() in message.text.lower()
     
@@ -94,6 +98,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"Ошибка обработки сообщения: {e}")
         await message.reply_text("Что-то пошло не так. Попробуйте еще раз.")
 
+async def post_init(application: Application):
+    # Удаляем вебхук перед запуском
+    await application.bot.delete_webhook()
+    logger.info("Вебхук удалён, запускаем polling")
+
 def main():
     # Проверка переменных окружения
     if not TOKEN:
@@ -103,11 +112,11 @@ def main():
         logger.error("DEEPSEEK_API_KEY environment variable is missing!")
         exit(1)
     
-    # Задержка для завершения предыдущих инстансов
-    logger.info("Ожидание 10 секунд перед запуском...")
-    time.sleep(10)
+    # Увеличиваем задержку для завершения предыдущих инстансов
+    logger.info("Ожидание 30 секунд перед запуском...")
+    time.sleep(30)
     
-    application = Application.builder().token(TOKEN).build()
+    application = Application.builder().token(TOKEN).post_init(post_init).build()
     
     # Регистрация обработчиков
     application.add_handler(CommandHandler("start", start))
@@ -117,15 +126,16 @@ def main():
     
     # Параметры для getUpdates
     poll_params = {
-        "timeout": 30,
-        "read_timeout": 30,
-        "connect_timeout": 30,
-        "pool_timeout": 30,
-        "drop_pending_updates": True  # Игнорировать старые сообщения
+        "timeout": 60,
+        "read_timeout": 60,
+        "connect_timeout": 60,
+        "pool_timeout": 60,
+        "drop_pending_updates": True,  # Игнорировать старые сообщения
+        "close_loop": False            # Важно для Render
     }
     
     logger.info("Запуск бота в режиме polling...")
-    application.run_polling(**poll_params)
+    application.run_polling(**poll_params, stop_signals=[])  # Отключаем обработку сигналов
 
 if __name__ == "__main__":
     main()
