@@ -1,6 +1,5 @@
 import os
 import logging
-import threading
 import asyncio
 import requests
 from telegram import Update
@@ -11,8 +10,7 @@ from telegram.ext import (
     ContextTypes,
     filters
 )
-from waitress import serve
-from flask import Flask, request
+from aiohttp import web
 
 # Настройка логгирования
 logging.basicConfig(
@@ -83,7 +81,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not (is_reply_to_bot or is_mention):
         return
     
-    logger.info(f"Processing message from {user.full_name}: {message.text}")
+    logger.info(f"Обработка сообщения от {user.full_name}: {message.text}")
     
     try:
         # Генерация ответа
@@ -93,24 +91,37 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Отправка ответа
         await message.reply_text(response)
     except Exception as e:
-        logger.error(f"Error handling message: {e}")
+        logger.error(f"Ошибка обработки сообщения: {e}")
         await message.reply_text("Что-то пошло не так. Попробуйте еще раз.")
 
-# Инициализация Flask
-app = Flask(__name__)
+# Веб-сервер для Render
+async def health_check(request):
+    return web.Response(text="Бот активен. Сервер работает.")
 
-@app.route("/")
-def home():
-    return "Бот активен. Сервер работает."
+async def start_web_server():
+    app = web.Application()
+    app.router.add_get('/', health_check)
+    app.router.add_get('/health', health_check)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    port = int(os.environ.get("PORT", 5000))
+    site = web.TCPSite(runner, '0.0.0.0', port)
+    await site.start()
+    logger.info(f"Веб-сервер запущен на порту {port}")
 
-@app.route("/health")
-def health_check():
-    return "OK", 200
-
-def run_bot():
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
+async def main():
+    # Проверка переменных окружения
+    if not TOKEN:
+        logger.error("TG_TOKEN environment variable is missing!")
+        exit(1)
+    if not API_KEY:
+        logger.error("DEEPSEEK_API_KEY environment variable is missing!")
+        exit(1)
     
+    # Запуск веб-сервера
+    asyncio.create_task(start_web_server())
+    
+    # Инициализация и запуск бота
     application = Application.builder().token(TOKEN).build()
     
     # Регистрация обработчиков
@@ -120,22 +131,8 @@ def run_bot():
     )
     
     logger.info("Бот запущен в режиме polling...")
-    loop.run_until_complete(application.run_polling())
+    await application.run_polling()
 
 if __name__ == "__main__":
-    # Проверка переменных окружения
-    if not TOKEN:
-        logger.error("TG_TOKEN environment variable is missing!")
-        exit(1)
-    if not API_KEY:
-        logger.error("DEEPSEEK_API_KEY environment variable is missing!")
-        exit(1)
-    
-    # Запуск бота в отдельном потоке
-    bot_thread = threading.Thread(target=run_bot, daemon=True)
-    bot_thread.start()
-    
-    # Запуск веб-сервера
-    port = int(os.environ.get("PORT", 5000))
-    logger.info(f"Starting web server on port {port}")
-    serve(app, host="0.0.0.0", port=port)
+    # Запуск основного приложения
+    asyncio.run(main())
