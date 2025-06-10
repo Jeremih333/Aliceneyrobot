@@ -2,7 +2,10 @@ import os
 import logging
 import requests
 import asyncio
+import time
+import sys
 from telegram import Update
+from telegram.error import Conflict
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -14,7 +17,8 @@ from telegram.ext import (
 # Настройка логгирования
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    level=logging.INFO
+    level=logging.INFO,
+    stream=sys.stdout  # Важно для Render
 )
 logger = logging.getLogger(__name__)
 
@@ -58,7 +62,9 @@ async def query_deepseek(prompt: str) -> str:
     
     for attempt in range(MAX_RETRIES):
         try:
-            response = requests.post(
+            # Используем асинхронный запрос
+            response = await asyncio.to_thread(
+                requests.post,
                 url, 
                 json=payload, 
                 headers=headers, 
@@ -122,26 +128,31 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # Обработка ошибок
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
-    logger.error(f"Global error: {context.error}", exc_info=True)
+    error = context.error
+    
+    # Обработка конфликта (код 409)
+    if isinstance(error, Conflict):
+        logger.critical("Conflict detected: terminating process")
+        await context.application.stop()
+        sys.exit(1)
+    
+    logger.error(f"Global error: {error}", exc_info=True)
+    
     if update and isinstance(update, Update) and update.message:
-        await update.message.reply_text("Произошла критическая ошибка. Перезапускаюсь...")
-    # Перезапуск приложения
-    await restart_bot(context.application)
-
-# Перезапуск бота
-async def restart_bot(application: Application):
-    logger.critical("Restarting bot...")
-    await application.stop()
-    await application.start()
+        await update.message.reply_text("Произошла ошибка. Попробуйте другую команду.")
 
 def main():
     # Проверка переменных окружения
     if not TOKEN:
         logger.error("TG_TOKEN environment variable is missing!")
-        return
+        sys.exit(1)
     if not API_KEY:
         logger.error("DEEPSEEK_API_KEY environment variable is missing!")
-        return
+        sys.exit(1)
+    
+    # Ждем перед запуском для завершения предыдущих инстансов
+    logger.info("Waiting 5 seconds before startup...")
+    time.sleep(5)
     
     # Создание приложения
     application = Application.builder().token(TOKEN).build()
@@ -166,7 +177,15 @@ def main():
     }
     
     logger.info("Starting bot...")
-    application.run_polling(**poll_params)
+    
+    try:
+        application.run_polling(**poll_params)
+    except Conflict as e:
+        logger.critical(f"Conflict on startup: {e}")
+        sys.exit(1)
+    except Exception as e:
+        logger.critical(f"Fatal error: {e}")
+        sys.exit(1)
 
 if __name__ == "__main__":
     main()
