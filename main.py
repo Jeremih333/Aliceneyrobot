@@ -1,8 +1,9 @@
 import os
 import logging
 import requests
-import time
 import asyncio
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from telegram import Update
 from telegram.ext import (
     Application,
@@ -22,7 +23,7 @@ logger = logging.getLogger(__name__)
 # Загрузка конфигурации
 TOKEN = os.getenv("TG_TOKEN")
 API_KEY = os.getenv("DEEPSEEK_API_KEY")
-BOT_USERNAME = "@aliceneyrobot"  # Убедитесь, что юзернейм правильный
+BOT_USERNAME = "@aliceneyrobot"
 
 # Загрузка персонажа
 try:
@@ -32,17 +33,31 @@ except Exception as e:
     logger.error(f"Error loading persona: {e}")
     PERSONA = "Ты девушка, тебе 18 лет, тебя зовут Алиса Двачевская, у тебя грубый характер но ранимая натура."
 
+# Класс для HTTP-сервера (для проверки работоспособности)
+class HealthHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header('Content-type', 'text/plain')
+        self.end_headers()
+        self.wfile.write(b'Service is alive')
+
+def run_http_server(port=8080):
+    server_address = ('', port)
+    httpd = HTTPServer(server_address, HealthHandler)
+    logger.info(f"Starting HTTP health check server on port {port}")
+    httpd.serve_forever()
+
 # API DeepSeek через OpenRouter
 def query_deepseek(prompt: str) -> str:
     url = "https://openrouter.ai/api/v1/chat/completions"
     headers = {
         "Authorization": f"Bearer {API_KEY}",
         "Content-Type": "application/json",
-        "HTTP-Referer": "https://render.com",  # Обязательный заголовок для OpenRouter
-        "X-Title": "TelegramBot"               # Обязательный заголовок для OpenRouter
+        "HTTP-Referer": "https://render.com",
+        "X-Title": "TelegramBot"
     }
     payload = {
-        "model": "deepseek/deepseek-chat",  # Исправленный идентификатор модели
+        "model": "deepseek/deepseek-chat",
         "messages": [
             {"role": "system", "content": PERSONA},
             {"role": "user", "content": prompt}
@@ -70,7 +85,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.message
     user = message.from_user
     
-    # Пропускаем сообщения без текста
     if not message.text:
         return
     
@@ -90,7 +104,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         # Генерация ответа
         prompt = f"{user.full_name}: {message.text}"
-        response = query_deepseek(prompt)
+        response = await asyncio.to_thread(query_deepseek, prompt)
         
         # Отправка ответа
         await message.reply_text(response)
@@ -98,25 +112,25 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"Ошибка обработки сообщения: {e}")
         await message.reply_text("Что-то пошло не так. Попробуйте еще раз.")
 
-async def post_init(application: Application):
-    # Удаляем вебхук перед запуском
-    await application.bot.delete_webhook()
-    logger.info("Вебхук удалён, запускаем polling")
-
-def main():
+async def main():
     # Проверка переменных окружения
     if not TOKEN:
         logger.error("TG_TOKEN environment variable is missing!")
-        exit(1)
+        return
     if not API_KEY:
         logger.error("DEEPSEEK_API_KEY environment variable is missing!")
-        exit(1)
-    
+        return
+
+    # Запуск HTTP-сервера для проверки работоспособности
+    port = int(os.getenv('PORT', 8080))
+    http_thread = threading.Thread(target=run_http_server, args=(port,), daemon=True)
+    http_thread.start()
+
     # Увеличиваем задержку для завершения предыдущих инстансов
-    logger.info("Ожидание 30 секунд перед запуском...")
-    time.sleep(30)
-    
-    application = Application.builder().token(TOKEN).post_init(post_init).build()
+    logger.info("Ожидание 45 секунд перед запуском бота...")
+    await asyncio.sleep(45)
+
+    application = Application.builder().token(TOKEN).build()
     
     # Регистрация обработчиков
     application.add_handler(CommandHandler("start", start))
@@ -124,18 +138,12 @@ def main():
         MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message)
     )
     
-    # Параметры для getUpdates
-    poll_params = {
-        "timeout": 60,
-        "read_timeout": 60,
-        "connect_timeout": 60,
-        "pool_timeout": 60,
-        "drop_pending_updates": True,  # Игнорировать старые сообщения
-        "close_loop": False            # Важно для Render
-    }
-    
     logger.info("Запуск бота в режиме polling...")
-    application.run_polling(**poll_params, stop_signals=[])  # Отключаем обработку сигналов
+    await application.run_polling(
+        drop_pending_updates=True,
+        close_loop=False,
+        stop_signals=[]
+    )
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
