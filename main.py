@@ -3,6 +3,7 @@ import logging
 import requests
 import asyncio
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from telegram import Update
 from telegram.ext import (
@@ -40,6 +41,10 @@ class HealthHandler(BaseHTTPRequestHandler):
         self.send_header('Content-type', 'text/plain')
         self.end_headers()
         self.wfile.write(b'Service is alive')
+    
+    def do_HEAD(self):
+        self.send_response(200)
+        self.end_headers()
 
 def run_http_server(port=8080):
     server_address = ('', port)
@@ -104,7 +109,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         # Генерация ответа
         prompt = f"{user.full_name}: {message.text}"
-        response = await asyncio.to_thread(query_deepseek, prompt)
+        loop = asyncio.get_running_loop()
+        response = await loop.run_in_executor(None, query_deepseek, prompt)
         
         # Отправка ответа
         await message.reply_text(response)
@@ -112,7 +118,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"Ошибка обработки сообщения: {e}")
         await message.reply_text("Что-то пошло не так. Попробуйте еще раз.")
 
-async def main():
+def main():
     # Проверка переменных окружения
     if not TOKEN:
         logger.error("TG_TOKEN environment variable is missing!")
@@ -128,7 +134,7 @@ async def main():
 
     # Увеличиваем задержку для завершения предыдущих инстансов
     logger.info("Ожидание 45 секунд перед запуском бота...")
-    await asyncio.sleep(45)
+    time.sleep(45)
 
     application = Application.builder().token(TOKEN).build()
     
@@ -139,11 +145,18 @@ async def main():
     )
     
     logger.info("Запуск бота в режиме polling...")
-    await application.run_polling(
-        drop_pending_updates=True,
-        close_loop=False,
-        stop_signals=[]
-    )
+    
+    # Параметры для polling
+    poll_params = {
+        "drop_pending_updates": True,
+        "close_loop": False,
+        "stop_signals": [],
+        "connect_timeout": 60,
+        "read_timeout": 60,
+        "pool_timeout": 60
+    }
+    
+    application.run_polling(**poll_params)
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
