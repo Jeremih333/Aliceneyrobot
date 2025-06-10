@@ -1,7 +1,6 @@
 import os
 import logging
 import requests
-import time
 import asyncio
 from telegram import Update
 from telegram.ext import (
@@ -19,30 +18,36 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Загрузка конфигурации
+# Конфигурация
 TOKEN = os.getenv("TG_TOKEN")
 API_KEY = os.getenv("DEEPSEEK_API_KEY")
-BOT_USERNAME = "@aliceneyrobot"  # Убедитесь, что юзернейм правильный
+BOT_USERNAME = "@aliceneyrobot"
+MAX_RETRIES = 3
+RETRY_DELAY = 2
 
-# Загрузка персонажа
-try:
-    with open("persona.txt", "r", encoding="utf-8") as f:
-        PERSONA = f.read().strip()
-except Exception as e:
-    logger.error(f"Error loading persona: {e}")
-    PERSONA = "Ты девушка, тебе 18 лет, тебя зовут Алиса Двачевская, у тебя грубый характер но ранимая натура."
+# Загрузка персонажа с обработкой ошибок
+def load_persona():
+    default_persona = "Ты девушка, тебе 18 лет, тебя зовут Алиса Двачевская, у тебя грубый характер но ранимая натура."
+    try:
+        with open("persona.txt", "r", encoding="utf-8") as f:
+            return f.read().strip() or default_persona
+    except Exception as e:
+        logger.error(f"Error loading persona: {e}")
+        return default_persona
 
-# API DeepSeek через OpenRouter
-def query_deepseek(prompt: str) -> str:
+PERSONA = load_persona()
+
+# API DeepSeek с повторными попытками
+async def query_deepseek(prompt: str) -> str:
     url = "https://openrouter.ai/api/v1/chat/completions"
     headers = {
         "Authorization": f"Bearer {API_KEY}",
         "Content-Type": "application/json",
-        "HTTP-Referer": "https://render.com",  # Обязательный заголовок для OpenRouter
-        "X-Title": "TelegramBot"               # Обязательный заголовок для OpenRouter
+        "HTTP-Referer": "https://render.com",
+        "X-Title": "TelegramBot"
     }
     payload = {
-        "model": "deepseek/deepseek-chat",  # Исправленный идентификатор модели
+        "model": "deepseek/deepseek-chat",
         "messages": [
             {"role": "system", "content": PERSONA},
             {"role": "user", "content": prompt}
@@ -51,30 +56,41 @@ def query_deepseek(prompt: str) -> str:
         "max_tokens": 400
     }
     
-    try:
-        response = requests.post(url, json=payload, headers=headers, timeout=30)
-        response.raise_for_status()
-        return response.json()["choices"][0]["message"]["content"]
-    except requests.exceptions.HTTPError as e:
-        logger.error(f"DeepSeek API HTTP error: {e.response.text}")
-    except Exception as e:
-        logger.error(f"DeepSeek API error: {e}")
+    for attempt in range(MAX_RETRIES):
+        try:
+            response = requests.post(
+                url, 
+                json=payload, 
+                headers=headers, 
+                timeout=30
+            )
+            response.raise_for_status()
+            return response.json()["choices"][0]["message"]["content"]
+            
+        except requests.exceptions.RequestException as e:
+            logger.warning(f"API attempt {attempt+1} failed: {str(e)}")
+            if attempt < MAX_RETRIES - 1:
+                await asyncio.sleep(RETRY_DELAY * (attempt + 1))
+            else:
+                logger.error(f"DeepSeek API failed after {MAX_RETRIES} attempts")
+                return "Произошла ошибка при обработке запроса. Попробуйте позже."
+    
     return "Произошла ошибка при обработке запроса. Попробуйте позже."
 
 # Обработчики команд
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Привет, меня зовут Алиса, если посмеешь относиться ко мне неуважительно то получишь пару крепких ударов!")
 
-# Обработка сообщений
+# Обработка сообщений с защитой от флуда
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.message
     user = message.from_user
     
-    # Пропускаем сообщения без текста
-    if not message.text:
+    # Игнорируем сообщения без текста и служебные команды
+    if not message.text or message.text.startswith('/'):
         return
     
-    # Проверка условий активации
+    # Проверка активации бота
     is_reply_to_bot = (
         message.reply_to_message and 
         message.reply_to_message.from_user.username and
@@ -85,38 +101,50 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not (is_reply_to_bot or is_mention):
         return
     
-    logger.info(f"Обработка сообщения от {user.full_name}: {message.text}")
+    logger.info(f"Processing message from {user.full_name}")
     
     try:
-        # Генерация ответа
-        prompt = f"{user.full_name}: {message.text}"
-        response = query_deepseek(prompt)
-        
-        # Отправка ответа
-        await message.reply_text(response)
+        # Добавляем индикатор "печатает"
+        async with context.bot.send_chat_action(
+            chat_id=message.chat_id, 
+            action="typing"
+        ):
+            # Генерация ответа
+            prompt = f"{user.full_name}: {message.text}"
+            response = await query_deepseek(prompt)
+            
+            # Отправка ответа
+            await message.reply_text(response[:4000])  # Обрезка длинных сообщений
+            
     except Exception as e:
-        logger.error(f"Ошибка обработки сообщения: {e}")
-        await message.reply_text("Что-то пошло не так. Попробуйте еще раз.")
+        logger.exception(f"Message processing error: {e}")
+        await message.reply_text("Произошла внутренняя ошибка. Попробуйте снова через минуту.")
 
-async def post_init(application: Application):
-    # Удаляем вебхук перед запуском
-    await application.bot.delete_webhook()
-    logger.info("Вебхук удалён, запускаем polling")
+# Обработка ошибок
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
+    logger.error(f"Global error: {context.error}", exc_info=True)
+    if update and isinstance(update, Update) and update.message:
+        await update.message.reply_text("Произошла критическая ошибка. Перезапускаюсь...")
+    # Перезапуск приложения
+    await restart_bot(context.application)
+
+# Перезапуск бота
+async def restart_bot(application: Application):
+    logger.critical("Restarting bot...")
+    await application.stop()
+    await application.start()
 
 def main():
     # Проверка переменных окружения
     if not TOKEN:
         logger.error("TG_TOKEN environment variable is missing!")
-        exit(1)
+        return
     if not API_KEY:
         logger.error("DEEPSEEK_API_KEY environment variable is missing!")
-        exit(1)
+        return
     
-    # Увеличиваем задержку для завершения предыдущих инстансов
-    logger.info("Ожидание 30 секунд перед запуском...")
-    time.sleep(30)
-    
-    application = Application.builder().token(TOKEN).post_init(post_init).build()
+    # Создание приложения
+    application = Application.builder().token(TOKEN).build()
     
     # Регистрация обработчиков
     application.add_handler(CommandHandler("start", start))
@@ -124,18 +152,21 @@ def main():
         MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message)
     )
     
-    # Параметры для getUpdates
+    # Глобальный обработчик ошибок
+    application.add_error_handler(error_handler)
+    
+    # Конфигурация polling
     poll_params = {
         "timeout": 60,
         "read_timeout": 60,
         "connect_timeout": 60,
         "pool_timeout": 60,
-        "drop_pending_updates": True,  # Игнорировать старые сообщения
-        "close_loop": False            # Важно для Render
+        "drop_pending_updates": True,
+        "close_loop": False
     }
     
-    logger.info("Запуск бота в режиме polling...")
-    application.run_polling(**poll_params, stop_signals=[])  # Отключаем обработку сигналов
+    logger.info("Starting bot...")
+    application.run_polling(**poll_params)
 
 if __name__ == "__main__":
     main()
