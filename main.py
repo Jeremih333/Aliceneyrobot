@@ -30,7 +30,7 @@ try:
         PERSONA = f.read().strip()
 except Exception as e:
     logger.error(f"Error loading persona: {e}")
-    PERSONA = "Ты полезный ассистент в Telegram группе. Отвечай кратко и по делу."
+    PERSONA = "Ты девушка, тебе 18 лет, тебя зовут Алиса Двачевская, у тебя грубый характер но ранимая натура."
 
 # API DeepSeek через OpenRouter
 def query_deepseek(prompt: str) -> str:
