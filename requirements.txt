@@ -1,6 +1,6 @@
 python-telegram-bot==20.3
 requests==2.31.0
-together==1.0.5
+together==1.5.17
 Flask==3.0.2
 waitress==3.0.0
 requests
