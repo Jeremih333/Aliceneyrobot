@@ -3,6 +3,7 @@ import logging
 import asyncio
 import threading
 import time
+import re
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from together import Together
 from telegram import Update
@@ -23,7 +24,7 @@ logger = logging.getLogger(__name__)
 
 # Загрузка конфигурации
 TOKEN = os.getenv("TG_TOKEN")
-API_KEY = os.getenv("TOGETHER_API_KEY")  # Изменено имя переменной
+API_KEY = os.getenv("TOGETHER_API_KEY")
 BOT_USERNAME = "@aliceneyrobot"
 
 # Загрузка персонажа
@@ -33,6 +34,19 @@ try:
 except Exception as e:
     logger.error(f"Error loading persona: {e}")
     PERSONA = "Ты девушка, тебе 18 лет, тебя зовут Алиса Двачевская, у тебя грубый характер но ранимая натура."
+
+# Функция для очистки ответа от технической информации
+def clean_response(response: str) -> str:
+    """Удаляет технические теги и их содержимое из ответа"""
+    # Удаляем <think> блоки и их содержимое
+    cleaned = re.sub(r'<think>.*?</think>', '', response, flags=re.DOTALL)
+    # Удаляем оставшиеся одиночные теги <think>
+    cleaned = cleaned.replace('<think>', '').replace('</think>', '')
+    # Удаляем другие технические маркеры
+    cleaned = cleaned.replace('</s>', '').replace('<s>', '')
+    # Удаляем пустые строки и лишние пробелы
+    cleaned = re.sub(r'\n\s*\n', '\n\n', cleaned).strip()
+    return cleaned
 
 # Класс для HTTP-сервера (для проверки работоспособности)
 class HealthHandler(BaseHTTPRequestHandler):
@@ -52,7 +66,7 @@ def run_http_server(port=8080):
     logger.info(f"Starting HTTP health check server on port {port}")
     httpd.serve_forever()
 
-# Новый запрос к DeepSeek через Together API
+# Запрос к DeepSeek через Together API
 def query_deepseek(prompt: str) -> str:
     try:
         client = Together(api_key=API_KEY)
@@ -101,8 +115,15 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         loop = asyncio.get_running_loop()
         response = await loop.run_in_executor(None, query_deepseek, prompt)
         
+        # Очистка ответа от технической информации
+        cleaned_response = clean_response(response)
+        
+        # Проверка на пустой ответ после очистки
+        if not cleaned_response.strip():
+            cleaned_response = "Я обдумываю твой вопрос... Попробуй спросить по-другому."
+        
         # Отправка ответа
-        await message.reply_text(response)
+        await message.reply_text(cleaned_response)
     except Exception as e:
         logger.error(f"Ошибка обработки сообщения: {e}")
         await message.reply_text("Что-то пошло не так. Попробуйте еще раз.")
@@ -113,7 +134,7 @@ def main():
         logger.error("TG_TOKEN environment variable is missing!")
         return
     if not API_KEY:
-        logger.error("TOGETHER_API_KEY environment variable is missing!")  # Обновлено сообщение
+        logger.error("TOGETHER_API_KEY environment variable is missing!")
         return
 
     # Запуск HTTP-сервера для проверки работоспособности
