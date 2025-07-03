@@ -1,10 +1,10 @@
 import os
 import logging
-import requests
 import asyncio
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
+from together import Together
 from telegram import Update
 from telegram.ext import (
     Application,
@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 
 # Загрузка конфигурации
 TOKEN = os.getenv("TG_TOKEN")
-API_KEY = os.getenv("DEEPSEEK_API_KEY")
+API_KEY = os.getenv("TOGETHER_API_KEY")  # Изменено имя переменной
 BOT_USERNAME = "@aliceneyrobot"
 
 # Загрузка персонажа
@@ -52,34 +52,23 @@ def run_http_server(port=8080):
     logger.info(f"Starting HTTP health check server on port {port}")
     httpd.serve_forever()
 
-# API DeepSeek через OpenRouter
+# Новый запрос к DeepSeek через Together API
 def query_deepseek(prompt: str) -> str:
-    url = "https://openrouter.ai/api/v1/chat/completions"
-    headers = {
-        "Authorization": f"Bearer {API_KEY}",
-        "Content-Type": "application/json",
-        "HTTP-Referer": "https://render.com",
-        "X-Title": "TelegramBot"
-    }
-    payload = {
-        "model": "deepseek/deepseek-chat",
-        "messages": [
-            {"role": "system", "content": PERSONA},
-            {"role": "user", "content": prompt}
-        ],
-        "temperature": 0.7,
-        "max_tokens": 400
-    }
-    
     try:
-        response = requests.post(url, json=payload, headers=headers, timeout=30)
-        response.raise_for_status()
-        return response.json()["choices"][0]["message"]["content"]
-    except requests.exceptions.HTTPError as e:
-        logger.error(f"DeepSeek API HTTP error: {e.response.text}")
+        client = Together(api_key=API_KEY)
+        response = client.chat.completions.create(
+            model="deepseek-ai/DeepSeek-R1-Distill-Llama-70B-free",
+            messages=[
+                {"role": "system", "content": PERSONA},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0.7,
+            max_tokens=400
+        )
+        return response.choices[0].message.content
     except Exception as e:
-        logger.error(f"DeepSeek API error: {e}")
-    return "Произошла ошибка при обработке запроса. Попробуйте позже."
+        logger.error(f"Together API error: {e}")
+        return "Произошла ошибка при обработке запроса. Попробуйте позже."
 
 # Обработчики команд
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -124,7 +113,7 @@ def main():
         logger.error("TG_TOKEN environment variable is missing!")
         return
     if not API_KEY:
-        logger.error("DEEPSEEK_API_KEY environment variable is missing!")
+        logger.error("TOGETHER_API_KEY environment variable is missing!")  # Обновлено сообщение
         return
 
     # Запуск HTTP-сервера для проверки работоспособности
