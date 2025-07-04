@@ -65,7 +65,7 @@ def run_http_server(port=8080):
 def query_deepseek(prompt: str) -> str:
     try:
         client = InferenceClient(
-            provider="novita",
+            provider="sambanova",
             api_key=HF_TOKEN
         )
         completion = client.chat_completion(  # Измененный вызов API
