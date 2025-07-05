@@ -24,16 +24,25 @@ logger = logging.getLogger(__name__)
 
 # Загрузка конфигурации
 TOKEN = os.getenv("TG_TOKEN")
-NOVITA_API_KEY = os.getenv("NOVITA_API_KEY")  # Изменено название переменной
+NOVITA_API_KEY = os.getenv("NOVITA_API_KEY")
 BOT_USERNAME = "@aliceneyrobot"
 
-# Загрузка персонажа
+# Глобальная переменная для хранения контекста пользователей
+user_contexts = {}
+
+# Загрузка персонажа с добавлением инструкции об именах
 try:
     with open("persona.txt", "r", encoding="utf-8") as f:
         PERSONA = f.read().strip()
+    PERSONA += "\n\nТы общаешься в чате с разными пользователями. Обращайся к ним по именам. " \
+               "Учитывай историю переписки с каждым пользователем отдельно. " \
+               "Сообщения пользователей начинаются с их имени в формате 'Имя: текст'."
 except Exception as e:
     logger.error(f"Error loading persona: {e}")
-    PERSONA = "Ты девушка, тебе 18 лет, тебя зовут Алиса Двачевская, у тебя грубый характер но ранимая натура."
+    PERSONA = "Ты девушка, тебе 18 лет, тебя зовут Алиса Двачевская, у тебя грубый характер но ранимая натура. " \
+              "Ты общаешься в чате с разными пользователями. Обращайся к ним по именам. " \
+              "Учитывай историю переписки с каждым пользователем отдельно. " \
+              "Сообщения пользователей начинаются с их имени в формате 'Имя: текст'."
 
 # Функция для очистки ответа от технической информации
 def clean_response(response: str) -> str:
@@ -62,8 +71,8 @@ def run_http_server(port=8080):
     logger.info(f"Starting HTTP health check server on port {port}")
     httpd.serve_forever()
 
-# Запрос к DeepSeek через Novita API
-def query_deepseek(prompt: str) -> str:
+# Запрос к DeepSeek через Novita API с учетом истории диалога
+def query_chat(messages: list) -> str:
     try:
         # Инициализация клиента Novita API
         client = OpenAI(
@@ -73,15 +82,12 @@ def query_deepseek(prompt: str) -> str:
         
         # Отправка запроса
         response = client.chat.completions.create(
-            model="deepseek/deepseek-r1-0528",  # Обновленная модель
-            messages=[
-                {"role": "system", "content": PERSONA},
-                {"role": "user", "content": prompt}
-            ],
+            model="deepseek/deepseek-r1-0528",
+            messages=messages,
             temperature=0.7,
             max_tokens=400,
-            stream=False,  # Отключение потокового режима
-            response_format={"type": "text"}  # Формат ответа
+            stream=False,
+            response_format={"type": "text"}
         )
         return response.choices[0].message.content
     except Exception as e:
@@ -92,10 +98,25 @@ def query_deepseek(prompt: str) -> str:
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Привет, меня зовут Алиса, если посмеешь относиться ко мне неуважительно то получишь пару крепких ударов!")
 
-# Обработка сообщений
+async def clear_context(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Очистка истории диалога для пользователя"""
+    user = update.message.from_user
+    chat_id = update.message.chat_id
+    key = (chat_id, user.id)
+    
+    if key in user_contexts:
+        del user_contexts[key]
+        logger.info(f"Context cleared for user {user.full_name} in chat {chat_id}")
+        await update.message.reply_text("История диалога очищена. Начнем заново!")
+    else:
+        await update.message.reply_text("У тебя еще нет истории диалога со мной!")
+
+# Обработка сообщений с учетом контекста
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.message
     user = message.from_user
+    chat_id = message.chat_id
+    key = (chat_id, user.id)
     
     if not message.text:
         return
@@ -111,13 +132,24 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not (is_reply_to_bot or is_mention):
         return
     
-    logger.info(f"Обработка сообщения от {user.full_name}: {message.text}")
+    logger.info(f"Обработка сообщения от {user.full_name} в чате {chat_id}: {message.text}")
     
     try:
+        # Получаем текущий контекст или создаем новый
+        history = user_contexts.get(key, [])
+        
+        # Формируем сообщение пользователя с именем
+        user_message_content = f"{user.full_name}: {message.text}"
+        user_message = {"role": "user", "content": user_message_content}
+        
+        # Собираем все сообщения для отправки
+        messages = [{"role": "system", "content": PERSONA}]
+        messages.extend(history)
+        messages.append(user_message)
+        
         # Генерация ответа
-        prompt = f"{user.full_name}: {message.text}"
         loop = asyncio.get_running_loop()
-        response = await loop.run_in_executor(None, query_deepseek, prompt)
+        response = await loop.run_in_executor(None, query_chat, messages)
         
         # Очистка ответа от технической информации
         cleaned_response = clean_response(response)
@@ -125,6 +157,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Проверка на пустой ответ после очистки
         if not cleaned_response.strip():
             cleaned_response = "Я обдумываю твой вопрос... Попробуй спросить по-другому."
+        
+        # Обновляем контекст
+        history.append(user_message)
+        history.append({"role": "assistant", "content": cleaned_response})
+        
+        # Ограничиваем историю последними 10 сообщениями
+        if len(history) > 10:
+            history = history[-10:]
+        
+        user_contexts[key] = history
         
         # Отправка ответа
         await message.reply_text(cleaned_response)
@@ -137,7 +179,7 @@ def main():
     if not TOKEN:
         logger.error("TG_TOKEN environment variable is missing!")
         return
-    if not NOVITA_API_KEY:  # Проверка нового ключа
+    if not NOVITA_API_KEY:
         logger.error("NOVITA_API_KEY environment variable is missing!")
         return
 
@@ -154,6 +196,7 @@ def main():
     
     # Регистрация обработчиков
     application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("clear", clear_context))
     application.add_handler(
         MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message)
     )
