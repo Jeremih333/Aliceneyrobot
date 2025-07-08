@@ -279,10 +279,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         if not cleaned_response.strip():
             cleaned_response = "Я обдумываю твой вопрос... Попробуй спросить по-другому."
-        else:
-            # Добавляем форматирование для длинных сообщений
-            if '\n\n' in cleaned_response:
-                cleaned_response = "💬 " + cleaned_response
         
         history.append(user_message)
         history.append({"role": "assistant", "content": cleaned_response})
