@@ -8,7 +8,7 @@ import random
 from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from openai import OpenAI
-from telegram import Update
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -216,7 +216,24 @@ def query_chat(messages: list) -> str:
 
 # Обработчики команд
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Привет, меня зовут Алиса, если посмеешь относиться ко мне неуважительно то получишь пару крепких ударов!")
+    # Обновленное приветственное сообщение
+    await update.message.reply_text(
+        "Привет, меня зовут Алиса, если посмеешь относиться ко мне неуважительно то получишь пару крепких ударов!\n\n"
+        "/info - информация обо мне и как правильно ко мне обращаться."
+    )
+
+async def info(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик команды /info с инлайн-кнопкой"""
+    keyboard = [
+        [InlineKeyboardButton("Информация", url="https://telegra.ph/Ob-Alise-Dvachevskoj-07-09")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await update.message.reply_text(
+        "❗️Здесь вы можете ознакомиться с правилами использования нашего бота.\n"
+        "Рекомендуем прочитать перед использованием.",
+        reply_markup=reply_markup
+    )
 
 async def clear_context(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.message.from_user
@@ -229,6 +246,27 @@ async def clear_context(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("История диалога очищена. Начнем заново!")
     else:
         await update.message.reply_text("У тебя еще нет истории диалога со мной!")
+
+async def handle_private_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик для некорректных сообщений в ЛС"""
+    message = update.message
+    user = message.from_user
+    
+    # Проверяем корректность обращения
+    is_reply_to_bot = (
+        message.reply_to_message and 
+        message.reply_to_message.from_user.username and
+        message.reply_to_message.from_user.username.lower() == BOT_USERNAME.lstrip("@").lower()
+    )
+    is_mention = BOT_USERNAME.lower() in message.text.lower()
+    
+    # Если обращение некорректное
+    if not (is_reply_to_bot or is_mention):
+        logger.info(f"Некорректное сообщение в ЛС от {user.full_name}")
+        await message.reply_text(
+            "❗️Для общения с Алисой нужно ответить на любое её сообщение, "
+            "либо использовать её юзернейм в отправляемом сообщении - @Aliceneyrobot"
+        )
 
 # Обработка сообщений с учетом лимитов
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -248,8 +286,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     is_mention = BOT_USERNAME.lower() in message.text.lower()
     
-    if not (is_reply_to_bot or is_mention):
-        return
+    # Для групповых чатов - пропускаем некорректные сообщения
+    if message.chat.type != "private":
+        if not (is_reply_to_bot or is_mention):
+            return
     
     # Проверка лимита сообщений (кроме безлимитного чата)
     if chat_id != UNLIMITED_CHAT_ID:
@@ -312,7 +352,18 @@ def main():
     
     # Регистрация обработчиков
     application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("info", info))
     application.add_handler(CommandHandler("clear", clear_context))
+    
+    # Обработчик для некорректных сообщений в ЛС
+    application.add_handler(
+        MessageHandler(
+            filters.ChatType.PRIVATE & filters.TEXT & ~filters.COMMAND & ~filters.REPLY,
+            handle_private_message
+        )
+    )
+    
+    # Основной обработчик сообщений
     application.add_handler(
         MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message)
     )
