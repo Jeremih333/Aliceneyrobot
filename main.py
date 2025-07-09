@@ -8,7 +8,7 @@ import random
 from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from openai import OpenAI
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -332,6 +332,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"Ошибка обработки сообщения: {e}")
         await message.reply_text("Что-то пошло не так. Попробуйте еще раз.")
 
+async def post_init(application: Application) -> None:
+    """Устанавливаем меню команд при запуске бота"""
+    commands = [
+        BotCommand("start", "Начало работы с ботом"),
+        BotCommand("info", "Информация о боте и правила использования"),
+        BotCommand("clear", "Очистить историю диалога")
+    ]
+    await application.bot.set_my_commands(commands)
+    logger.info("Меню команд бота установлено")
+
 def main():
     if not TOKEN:
         logger.error("TG_TOKEN environment variable is missing!")
@@ -348,7 +358,8 @@ def main():
     logger.info("Ожидание 45 секунд перед запуском бота...")
     time.sleep(45)
 
-    application = Application.builder().token(TOKEN).build()
+    # Создаем приложение с обработчиком post_init
+    application = Application.builder().token(TOKEN).post_init(post_init).build()
     
     # Регистрация обработчиков
     application.add_handler(CommandHandler("start", start))
