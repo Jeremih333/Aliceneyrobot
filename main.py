@@ -247,27 +247,6 @@ async def clear_context(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text("У тебя еще нет истории диалога со мной!")
 
-async def handle_private_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработчик для некорректных сообщений в ЛС"""
-    message = update.message
-    user = message.from_user
-    
-    # Проверяем корректность обращения
-    is_reply_to_bot = (
-        message.reply_to_message and 
-        message.reply_to_message.from_user.username and
-        message.reply_to_message.from_user.username.lower() == BOT_USERNAME.lstrip("@").lower()
-    )
-    is_mention = BOT_USERNAME.lower() in message.text.lower()
-    
-    # Если обращение некорректное
-    if not (is_reply_to_bot or is_mention):
-        logger.info(f"Некорректное сообщение в ЛС от {user.full_name}")
-        await message.reply_text(
-            "❗️Для общения с Алисой нужно ответить на любое её сообщение, "
-            "либо использовать её юзернейм в отправляемом сообщении - @Aliceneyrobot"
-        )
-
 # Обработка сообщений с учетом лимитов
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.message
@@ -278,7 +257,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not message.text:
         return
     
-    # Проверка условий активации
+    # Проверка условий активации для групповых чатов
     is_reply_to_bot = (
         message.reply_to_message and 
         message.reply_to_message.from_user.username and
@@ -365,14 +344,6 @@ def main():
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("info", info))
     application.add_handler(CommandHandler("clear", clear_context))
-    
-    # Обработчик для некорректных сообщений в ЛС
-    application.add_handler(
-        MessageHandler(
-            filters.ChatType.PRIVATE & filters.TEXT & ~filters.COMMAND & ~filters.REPLY,
-            handle_private_message
-        )
-    )
     
     # Основной обработчик сообщений
     application.add_handler(
