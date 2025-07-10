@@ -12,9 +12,7 @@ from telegram import (
     Update, 
     InlineKeyboardButton, 
     InlineKeyboardMarkup, 
-    BotCommand,
-    ReplyKeyboardMarkup,
-    ReplyKeyboardRemove
+    BotCommand
 )
 from telegram.ext import (
     Application,
@@ -47,6 +45,7 @@ UNLIMITED_CHAT_ID = -1001481824277
 # Глобальные переменные
 user_contexts = {}
 daily_message_counters = {}  # Формат: {(user_id, date): count}
+unlimited_users = {}  # Пользователи с безлимитом: {user_id: date}
 last_cleanup_time = time.time()
 
 # Состояния для ConversationHandler разработчика
@@ -75,15 +74,16 @@ except Exception as e:
 
 # Функция очистки устаревших счетчиков
 def cleanup_old_counters():
-    global daily_message_counters, last_cleanup_time
+    global daily_message_counters, unlimited_users, last_cleanup_time
     current_time = time.time()
+    today = datetime.utcnow().date()
     
     # Проверяем каждые 30 минут
     if current_time - last_cleanup_time > 1800:
-        logger.info("Starting cleanup of old message counters")
-        today = datetime.utcnow().date()
+        logger.info("Starting cleanup of old data")
         keys_to_delete = []
         
+        # Удаляем старые счетчики сообщений
         for key in daily_message_counters.keys():
             _, date_str = key
             record_date = datetime.strptime(date_str, "%Y-%m-%d").date()
@@ -94,8 +94,18 @@ def cleanup_old_counters():
             del daily_message_counters[key]
             logger.debug(f"Removed old counter: {key}")
         
+        # Удаляем устаревшие безлимитные записи
+        users_to_remove = []
+        for user_id, unlimited_date in unlimited_users.items():
+            if (today - unlimited_date).days > 0:
+                users_to_remove.append(user_id)
+        
+        for user_id in users_to_remove:
+            del unlimited_users[user_id]
+            logger.debug(f"Removed unlimited status for user: {user_id}")
+        
         last_cleanup_time = current_time
-        logger.info(f"Cleanup completed. Removed {len(keys_to_delete)} old counters")
+        logger.info(f"Cleanup completed. Removed {len(keys_to_delete)} old counters and {len(users_to_remove)} unlimited users")
 
 # Функция проверки лимита сообщений
 def check_message_limit(user_id: int) -> bool:
@@ -104,6 +114,10 @@ def check_message_limit(user_id: int) -> bool:
     
     # Очистка старых записей перед проверкой
     cleanup_old_counters()
+    
+    # Проверяем безлимитный статус
+    if user_id in unlimited_users:
+        return True
     
     # Инициализация счетчика
     if key not in daily_message_counters:
@@ -276,19 +290,48 @@ async def stat(update: Update, context: ContextTypes.DEFAULT_TYPE):
             has_context = True
             break
     
-    # Получаем количество использованных сообщений
-    used_messages = daily_message_counters.get(key, 0)
-    remaining = max(0, 35 - used_messages)
+    # Проверяем безлимитный статус
+    if user.id in unlimited_users:
+        remaining_text = "♾️"
+    else:
+        # Получаем количество использованных сообщений
+        used_messages = daily_message_counters.get(key, 0)
+        remaining = max(0, 35 - used_messages)
+        remaining_text = f"{remaining}/35"
     
     # Формируем сообщение
     message = (
         f"📊 <b>Ваш статус:</b>\n\n"
-        f"• Осталось сообщений сегодня: <b>{remaining}/35</b>\n"
+        f"• Осталось сообщений сегодня: <b>{remaining_text}</b>\n"
         f"• История диалога: {'сохранена' if has_context else 'отсутствует'}\n\n"
         f"💡 Для сброса истории используйте /clear"
     )
     
     await update.message.reply_text(message, parse_mode="HTML")
+
+# Получение статистики пользователя по ID
+def get_user_stat(user_id: int) -> str:
+    today = datetime.utcnow().strftime("%Y-%m-%d")
+    key = (user_id, today)
+    
+    # Проверяем безлимитный статус
+    if user_id in unlimited_users:
+        remaining_text = "♾️"
+    else:
+        # Получаем количество использованных сообщений
+        used_messages = daily_message_counters.get(key, 0)
+        remaining = max(0, 35 - used_messages)
+        remaining_text = f"{remaining}/35"
+    
+    # Проверяем наличие истории диалога
+    has_context = any(ctx_key[1] == user_id for ctx_key in user_contexts.keys())
+    
+    # Формируем статистику
+    return (
+        f"👤 <b>Статистика пользователя ID {user_id}:</b>\n\n"
+        f"• Осталось сообщений сегодня: <b>{remaining_text}</b>\n"
+        f"• История диалога: {'сохранена' if has_context else 'отсутствует'}\n"
+    )
 
 # Обработчик команды /dev (только для разработчика)
 async def dev(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -299,7 +342,7 @@ async def dev(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if user.id != DEVELOPER_ID:
         logger.warning(f"User {user.id} tried to access dev command")
         await update.message.reply_text("У вас нет прав для использования этой команды.")
-        return
+        return ConversationHandler.END
     
     # Запрашиваем ID пользователя
     await update.message.reply_text(
@@ -322,17 +365,22 @@ async def select_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = int(user_input)
     context.user_data['target_user_id'] = user_id
     
+    # Показываем статистику пользователя
+    user_stat = get_user_stat(user_id)
+    
     # Создаем клавиатуру с действиями
     keyboard = [
         [InlineKeyboardButton("➕ Добавить сообщения", callback_data="add_messages")],
-        [InlineKeyboardButton("➖ Убрать сообщения", callback_data="remove_messages")]
+        [InlineKeyboardButton("➖ Убрать сообщения", callback_data="remove_messages")],
+        [InlineKeyboardButton("♾️ Включить безлимит", callback_data="set_unlimited")],
+        [InlineKeyboardButton("🚫 Выключить безлимит", callback_data="remove_unlimited")]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     
     await update.message.reply_text(
-        f"👤 Выбран пользователь с ID: {user_id}\n"
-        "Выберите действие:",
-        reply_markup=reply_markup
+        f"{user_stat}\nВыберите действие:",
+        reply_markup=reply_markup,
+        parse_mode="HTML"
     )
     
     return SELECT_ACTION
@@ -345,11 +393,37 @@ async def select_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
     action = query.data
     context.user_data['action'] = action
     
-    # Определяем текст в зависимости от действия
+    # Для специальных действий обрабатываем сразу
+    if action in ["set_unlimited", "remove_unlimited"]:
+        target_user_id = context.user_data['target_user_id']
+        today = datetime.utcnow().date()
+        
+        if action == "set_unlimited":
+            unlimited_users[target_user_id] = today
+            action_result = "безлимит включен ♾️"
+        else:
+            if target_user_id in unlimited_users:
+                del unlimited_users[target_user_id]
+                action_result = "безлимит выключен 🚫"
+            else:
+                action_result = "безлимит уже выключен 🚫"
+        
+        # Формируем отчет
+        report = (
+            f"✅ Успешно!\n\n"
+            f"• Пользователь ID: {target_user_id}\n"
+            f"• Действие: {action_result}\n\n"
+            f"{get_user_stat(target_user_id)}"
+        )
+        
+        await query.edit_message_text(report, parse_mode="HTML")
+        return ConversationHandler.END
+    
+    # Для обычных действий запрашиваем количество
     action_text = "добавить" if action == "add_messages" else "убрать"
     
     await query.edit_message_text(
-        f"✏️ Введите количество сообщений для {action_text}:"
+        f"✏️ Введите количество сообщений для {action_text} или отправьте ♾️ для безлимита:"
     )
     
     return INPUT_AMOUNT
@@ -357,44 +431,52 @@ async def select_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # Обработка ввода количества сообщений
 async def input_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_input = update.message.text.strip()
-    
-    # Проверяем, является ли ввод числом
-    if not user_input.isdigit():
-        await update.message.reply_text("❌ Количество сообщений должно быть числом. Попробуйте еще раз:")
-        return INPUT_AMOUNT
-    
-    amount = int(user_input)
     target_user_id = context.user_data['target_user_id']
     action = context.user_data['action']
     today = datetime.utcnow().strftime("%Y-%m-%d")
     key = (target_user_id, today)
     
-    # Инициализируем счетчик, если его еще нет
-    if key not in daily_message_counters:
-        daily_message_counters[key] = 0
-    
-    # Выполняем действие
-    if action == "add_messages":
-        daily_message_counters[key] = max(0, daily_message_counters[key] - amount)
-        action_result = "добавлены"
+    # Обработка специальных эмодзи
+    if user_input == "♾️":
+        # Включаем безлимит
+        unlimited_users[target_user_id] = datetime.utcnow().date()
+        action_result = "безлимит включен ♾️"
+    elif user_input == "🚫":
+        # Выключаем безлимит
+        if target_user_id in unlimited_users:
+            del unlimited_users[target_user_id]
+            action_result = "безлимит выключен 🚫"
+        else:
+            action_result = "безлимит уже выключен 🚫"
     else:
-        daily_message_counters[key] += amount
-        action_result = "убраны"
-    
-    # Получаем текущее значение
-    current_count = daily_message_counters[key]
-    remaining = max(0, 35 - current_count)
+        # Обработка числового ввода
+        if not user_input.isdigit():
+            await update.message.reply_text("❌ Количество сообщений должно быть числом или эмодзи ♾️/🚫. Попробуйте еще раз:")
+            return INPUT_AMOUNT
+        
+        amount = int(user_input)
+        
+        # Инициализируем счетчик, если его еще нет
+        if key not in daily_message_counters:
+            daily_message_counters[key] = 0
+        
+        # Выполняем действие
+        if action == "add_messages":
+            daily_message_counters[key] = max(0, daily_message_counters[key] - amount)
+            action_result = f"добавлено {amount} сообщений"
+        else:
+            daily_message_counters[key] += amount
+            action_result = f"убрано {amount} сообщений"
     
     # Формируем отчет
     report = (
         f"✅ Успешно!\n\n"
         f"• Пользователь ID: {target_user_id}\n"
-        f"• Действие: {action_result} {amount} сообщений\n"
-        f"• Текущее количество использованных сообщений: {current_count}\n"
-        f"• Осталось сообщений: {remaining}/35"
+        f"• Действие: {action_result}\n\n"
+        f"{get_user_stat(target_user_id)}"
     )
     
-    await update.message.reply_text(report)
+    await update.message.reply_text(report, parse_mode="HTML")
     
     # Завершаем диалог
     return ConversationHandler.END
