@@ -8,13 +8,22 @@ import random
 from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from openai import OpenAI
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand
+from telegram import (
+    Update, 
+    InlineKeyboardButton, 
+    InlineKeyboardMarkup, 
+    BotCommand,
+    ReplyKeyboardMarkup,
+    ReplyKeyboardRemove
+)
 from telegram.ext import (
     Application,
     CommandHandler,
     MessageHandler,
     ContextTypes,
-    filters
+    filters,
+    ConversationHandler,
+    CallbackQueryHandler
 )
 
 # Настройка логгирования
@@ -29,6 +38,9 @@ TOKEN = os.getenv("TG_TOKEN")
 NOVITA_API_KEY = os.getenv("NOVITA_API_KEY")
 BOT_USERNAME = "@aliceneyrobot"
 
+# Идентификатор разработчика
+DEVELOPER_ID = 1040929628
+
 # Идентификатор чата без ограничений
 UNLIMITED_CHAT_ID = -1001481824277
 
@@ -36,6 +48,9 @@ UNLIMITED_CHAT_ID = -1001481824277
 user_contexts = {}
 daily_message_counters = {}  # Формат: {(user_id, date): count}
 last_cleanup_time = time.time()
+
+# Состояния для ConversationHandler разработчика
+SELECT_USER, SELECT_ACTION, INPUT_AMOUNT = range(3)
 
 # Список эмодзи для использования
 EMOJI_LIST = ["😊", "😂", "😍", "🤔", "😎", "👍", "❤️", "✨", "🎉", "💔"]
@@ -219,7 +234,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Обновленное приветственное сообщение
     await update.message.reply_text(
         "Привет, меня зовут Алиса, если посмеешь относиться ко мне неуважительно то получишь пару крепких ударов!\n\n"
-        "/info - информация обо мне и как правильно ко мне обращаться."
+        "/info - информация обо мне и как правильно ко мне обращаться.\n"
+        "/stat - узнать свой статус и оставшиеся сообщения"
     )
 
 async def info(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -246,6 +262,147 @@ async def clear_context(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("История диалога очищена. Начнем заново!")
     else:
         await update.message.reply_text("У тебя еще нет истории диалога со мной!")
+
+async def stat(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик команды /stat - информация о статусе пользователя"""
+    user = update.message.from_user
+    today = datetime.utcnow().strftime("%Y-%m-%d")
+    key = (user.id, today)
+    
+    # Проверяем наличие истории диалога
+    has_context = False
+    for ctx_key in user_contexts.keys():
+        if ctx_key[1] == user.id:  # Ищем по user_id
+            has_context = True
+            break
+    
+    # Получаем количество использованных сообщений
+    used_messages = daily_message_counters.get(key, 0)
+    remaining = max(0, 35 - used_messages)
+    
+    # Формируем сообщение
+    message = (
+        f"📊 <b>Ваш статус:</b>\n\n"
+        f"• Осталось сообщений сегодня: <b>{remaining}/35</b>\n"
+        f"• История диалога: {'сохранена' if has_context else 'отсутствует'}\n\n"
+        f"💡 Для сброса истории используйте /clear"
+    )
+    
+    await update.message.reply_text(message, parse_mode="HTML")
+
+# Обработчик команды /dev (только для разработчика)
+async def dev(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Скрытая команда для разработчика"""
+    user = update.message.from_user
+    
+    # Проверяем, является ли пользователь разработчиком
+    if user.id != DEVELOPER_ID:
+        logger.warning(f"User {user.id} tried to access dev command")
+        await update.message.reply_text("У вас нет прав для использования этой команды.")
+        return
+    
+    # Запрашиваем ID пользователя
+    await update.message.reply_text(
+        "🔧 <b>Режим разработчика</b>\n\n"
+        "Введите ID пользователя, с которым хотите работать:",
+        parse_mode="HTML"
+    )
+    
+    return SELECT_USER
+
+# Обработка введенного ID пользователя
+async def select_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_input = update.message.text.strip()
+    
+    # Проверяем, является ли ввод числом
+    if not user_input.isdigit():
+        await update.message.reply_text("❌ ID пользователя должен быть числом. Попробуйте еще раз:")
+        return SELECT_USER
+    
+    user_id = int(user_input)
+    context.user_data['target_user_id'] = user_id
+    
+    # Создаем клавиатуру с действиями
+    keyboard = [
+        [InlineKeyboardButton("➕ Добавить сообщения", callback_data="add_messages")],
+        [InlineKeyboardButton("➖ Убрать сообщения", callback_data="remove_messages")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await update.message.reply_text(
+        f"👤 Выбран пользователь с ID: {user_id}\n"
+        "Выберите действие:",
+        reply_markup=reply_markup
+    )
+    
+    return SELECT_ACTION
+
+# Обработка выбора действия
+async def select_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    action = query.data
+    context.user_data['action'] = action
+    
+    # Определяем текст в зависимости от действия
+    action_text = "добавить" if action == "add_messages" else "убрать"
+    
+    await query.edit_message_text(
+        f"✏️ Введите количество сообщений для {action_text}:"
+    )
+    
+    return INPUT_AMOUNT
+
+# Обработка ввода количества сообщений
+async def input_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_input = update.message.text.strip()
+    
+    # Проверяем, является ли ввод числом
+    if not user_input.isdigit():
+        await update.message.reply_text("❌ Количество сообщений должно быть числом. Попробуйте еще раз:")
+        return INPUT_AMOUNT
+    
+    amount = int(user_input)
+    target_user_id = context.user_data['target_user_id']
+    action = context.user_data['action']
+    today = datetime.utcnow().strftime("%Y-%m-%d")
+    key = (target_user_id, today)
+    
+    # Инициализируем счетчик, если его еще нет
+    if key not in daily_message_counters:
+        daily_message_counters[key] = 0
+    
+    # Выполняем действие
+    if action == "add_messages":
+        daily_message_counters[key] = max(0, daily_message_counters[key] - amount)
+        action_result = "добавлены"
+    else:
+        daily_message_counters[key] += amount
+        action_result = "убраны"
+    
+    # Получаем текущее значение
+    current_count = daily_message_counters[key]
+    remaining = max(0, 35 - current_count)
+    
+    # Формируем отчет
+    report = (
+        f"✅ Успешно!\n\n"
+        f"• Пользователь ID: {target_user_id}\n"
+        f"• Действие: {action_result} {amount} сообщений\n"
+        f"• Текущее количество использованных сообщений: {current_count}\n"
+        f"• Осталось сообщений: {remaining}/35"
+    )
+    
+    await update.message.reply_text(report)
+    
+    # Завершаем диалог
+    return ConversationHandler.END
+
+# Отмена диалога разработчика
+async def cancel_dev(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("❌ Операция отменена.")
+    return ConversationHandler.END
 
 # Обработка сообщений с учетом лимитов
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -316,7 +473,8 @@ async def post_init(application: Application) -> None:
     commands = [
         BotCommand("start", "Начало работы с ботом"),
         BotCommand("info", "Информация о боте и правила использования"),
-        BotCommand("clear", "Очистить историю диалога")
+        BotCommand("clear", "Очистить историю диалога"),
+        BotCommand("stat", "Статус и оставшиеся сообщения")
     ]
     await application.bot.set_my_commands(commands)
     logger.info("Меню команд бота установлено")
@@ -340,10 +498,24 @@ def main():
     # Создаем приложение с обработчиком post_init
     application = Application.builder().token(TOKEN).post_init(post_init).build()
     
-    # Регистрация обработчиков
+    # Регистрация обработчиков команд
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("info", info))
     application.add_handler(CommandHandler("clear", clear_context))
+    application.add_handler(CommandHandler("stat", stat))
+    
+    # Скрытая команда для разработчика
+    dev_handler = ConversationHandler(
+        entry_points=[CommandHandler("dev", dev)],
+        states={
+            SELECT_USER: [MessageHandler(filters.TEXT & ~filters.COMMAND, select_user)],
+            SELECT_ACTION: [CallbackQueryHandler(select_action)],
+            INPUT_AMOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, input_amount)]
+        },
+        fallbacks=[CommandHandler("cancel", cancel_dev)],
+        allow_reentry=True
+    )
+    application.add_handler(dev_handler)
     
     # Основной обработчик сообщений
     application.add_handler(
