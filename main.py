@@ -37,7 +37,7 @@ logger = logging.getLogger(__name__)
 # Загрузка конфигурации
 TOKEN = os.getenv("TG_TOKEN")
 NOVITA_API_KEY = os.getenv("NOVITA_API_KEY")
-BOT_USERNAME = "@aliceneyrobot"
+BOT_USERNAME = os.getenv("BOT_USERNAME", "@aliceneyrobot")  # Исправлено: получение из переменных окружения
 
 # Идентификатор разработчика
 DEVELOPER_ID = 1040929628
@@ -90,20 +90,29 @@ def cleanup_old_counters():
         
         # Очистка daily_message_counters
         for key in list(daily_message_counters.keys()):
-            _, date_str = key
-            record_date = datetime.strptime(date_str, "%Y-%m-%d").date()
-            if (today - record_date).days > 1:
-                keys_to_delete.append(key)
+            user_id, date_str = key
+            try:
+                record_date = datetime.strptime(date_str, "%Y-%m-%d").date()
+                if (today - record_date).days > 1:
+                    keys_to_delete.append(key)
+                    del daily_message_counters[key]
+            except ValueError:
+                # Удаляем невалидные ключи
                 del daily_message_counters[key]
+                logger.warning(f"Removed invalid key: {key}")
         
         # Очистка user_bonus_messages
         for key in list(user_bonus_messages.keys()):
-            _, date_str = key
-            record_date = datetime.strptime(date_str, "%Y-%m-%d").date()
-            if (today - record_date).days > 1:
-                if key not in keys_to_delete:
-                    keys_to_delete.append(key)
+            user_id, date_str = key
+            try:
+                record_date = datetime.strptime(date_str, "%Y-%m-%d").date()
+                if (today - record_date).days > 1:
+                    if key not in keys_to_delete:
+                        keys_to_delete.append(key)
+                    del user_bonus_messages[key]
+            except ValueError:
                 del user_bonus_messages[key]
+                logger.warning(f"Removed invalid key: {key}")
         
         last_cleanup_time = current_time
         logger.info(f"Cleanup completed. Removed {len(keys_to_delete)} old counters")
@@ -141,22 +150,23 @@ def check_message_limit(user_id: int) -> bool:
     logger.info(f"User {user_id} message count: {daily_message_counters[key]}/{total_limit} (base: {base_limit}, referrals: {referral_bonus}, bonus: {bonus_messages})")
     return True
 
-# Функция для форматирования действий (без обратных кавычек)
-def format_actions(text: str) -> str:
-    # Просто оставляем действия в формате *действие*
-    return text
+# Функция для экранирования Markdown символов
+def escape_markdown(text: str) -> str:
+    escape_chars = r'\_*[]()~`>#+-=|{}.!'
+    return re.sub(f'([{re.escape(escape_chars)}])', r'\\\1', text)
 
-# Функция для добавления эмодзи (реже и только в конце)
+# Функция для форматирования действий
+def format_actions(text: str) -> str:
+    # Экранируем все символы, кроме звездочек для действий
+    return re.sub(r'\*(.*?)\*', r'\1', text)
+
+# Функция для добавления эмодзи
 def add_emojis(text: str) -> str:
     if not text:
         return text
     
-    # Добавляем эмодзи только в 20% случаев
     if random.random() < 0.2:
-        # Добавляем только 1 эмодзи
         selected_emoji = random.choice(EMOJI_LIST)
-        
-        # Убедимся, что в конце нет эмодзи
         if text[-1] not in EMOJI_LIST:
             return text + selected_emoji
     return text
@@ -166,7 +176,6 @@ def complete_sentences(text: str) -> str:
     if not text:
         return text
     
-    # Если текст не заканчивается на пунктуационный знак, добавляем точку
     if not re.search(r'[.!?…]$', text):
         text += '.'
     
@@ -174,41 +183,25 @@ def complete_sentences(text: str) -> str:
 
 # Функция для форматирования абзацев
 def format_paragraphs(text: str) -> str:
-    # Разделяем текст на абзацы по двойным переносам строк
     paragraphs = text.split('\n\n')
-    
-    # Форматируем каждый абзац с отступом
     formatted = []
     for paragraph in paragraphs:
         if paragraph.strip():
-            # Убираем лишние пробелы
             cleaned = re.sub(r'\s+', ' ', paragraph).strip()
-            # Добавляем красную строку (4 пробела в начале)
-            formatted.append(f"    {cleaned}")
+            formatted.append(cleaned)
     
-    # Собираем обратно с двойными переносами строк
     return '\n\n'.join(formatted)
 
 # Функция для очистки ответа
 def clean_response(response: str) -> str:
-    # Удаляем специальные теги
     cleaned = re.sub(r'<think>.*?</think>', '', response, flags=re.DOTALL)
     cleaned = cleaned.replace('<think>', '').replace('</think>', '')
     cleaned = cleaned.replace('</s>', '').replace('<s>', '')
     
-    # Форматируем действия (без обратных кавычек)
     cleaned = format_actions(cleaned)
-    
-    # Удаляем лишние переносы
     cleaned = re.sub(r'\n\s*\n', '\n\n', cleaned).strip()
-    
-    # Завершаем незаконченные предложения
     cleaned = complete_sentences(cleaned)
-    
-    # Форматируем абзацы
     cleaned = format_paragraphs(cleaned)
-    
-    # Добавляем эмодзи только в конце всего сообщения (реже)
     cleaned = add_emojis(cleaned)
     
     return cleaned
@@ -243,7 +236,7 @@ def query_chat(messages: list) -> str:
             model="deepseek/deepseek-r1-0528",
             messages=messages,
             temperature=0.7,
-            max_tokens=600,  # Увеличили лимит токенов для форматирования
+            max_tokens=600,
             stream=False,
             response_format={"type": "text"}
         )
@@ -256,19 +249,13 @@ def query_chat(messages: list) -> str:
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.message.from_user
     
-    # Обработка реферальной ссылки
     if context.args and context.args[0].isdigit():
         referrer_id = int(context.args[0])
-        
-        # Проверка чтобы пользователь не пригласил сам себя
-        if referrer_id != user.id:
-            # Регистрируем реферала только один раз
-            if user.id not in user_invited_by:
-                user_invited_by[user.id] = referrer_id
-                user_referrals[referrer_id] = user_referrals.get(referrer_id, 0) + 1
-                logger.info(f"New referral: user {user.id} invited by {referrer_id}")
+        if referrer_id != user.id and user.id not in user_invited_by:
+            user_invited_by[user.id] = referrer_id
+            user_referrals[referrer_id] = user_referrals.get(referrer_id, 0) + 1
+            logger.info(f"New referral: user {user.id} invited by {referrer_id}")
     
-    # Обновленное приветственное сообщение
     await update.message.reply_text(
         "Привет, меня зовут Алиса, если посмеешь относиться ко мне неуважительно то получишь пару крепких ударов!\n\n"
         "/info - информация обо мне и как правильно ко мне обращаться.\n"
@@ -277,7 +264,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def info(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработчик команды /info с инлайн-кнопкой"""
     keyboard = [
         [InlineKeyboardButton("Информация", url="https://telegra.ph/Ob-Alise-Dvachevskoj-07-09")]
     ]
@@ -290,7 +276,6 @@ async def info(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def ref_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработчик команды /ref - реферальная программа"""
     user = update.message.from_user
     bot_username = (await context.bot.get_me()).username
     ref_link = f"https://t.me/{bot_username}?start={user.id}"
@@ -318,29 +303,20 @@ async def clear_context(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("У тебя еще нет истории диалога со мной!")
 
 async def stat(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработчик команды /stat - информация о статусе пользователя"""
     user = update.message.from_user
     today = datetime.utcnow().strftime("%Y-%m-%d")
     key = (user.id, today)
     
-    # Проверяем наличие истории диалога
-    has_context = False
-    for ctx_key in user_contexts.keys():
-        if ctx_key[1] == user.id:  # Ищем по user_id
-            has_context = True
-            break
+    has_context = any(ctx_key[1] == user.id for ctx_key in user_contexts.keys())
     
-    # Получаем количество использованных сообщений
     used_messages = daily_message_counters.get(key, 0)
     
-    # Рассчитываем лимиты
     base_limit = 35
     referral_bonus = user_referrals.get(user.id, 0) * 3
     bonus_messages = user_bonus_messages.get(key, 0)
     total_limit = base_limit + referral_bonus + bonus_messages
     remaining = max(0, total_limit - used_messages)
     
-    # Формируем сообщение
     message = (
         f"📊 <b>Ваш статус:</b>\n\n"
         f"• Базовый лимит: {base_limit}\n"
@@ -356,18 +332,15 @@ async def stat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     await update.message.reply_text(message, parse_mode="HTML")
 
-# Обработчик команды /dev (только для разработчика)
+# Обработчик команды /dev
 async def dev(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Скрытая команда для разработчика"""
     user = update.message.from_user
     
-    # Проверяем, является ли пользователь разработчиком
     if user.id != DEVELOPER_ID:
         logger.warning(f"User {user.id} tried to access dev command")
         await update.message.reply_text("У вас нет прав для использования этой команды.")
         return
     
-    # Запрашиваем ID пользователя
     await update.message.reply_text(
         "🔧 <b>Режим разработчика</b>\n\n"
         "Введите ID пользователя, с которым хотите работать:",
@@ -380,7 +353,6 @@ async def dev(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def select_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_input = update.message.text.strip()
     
-    # Проверяем, является ли ввод числом
     if not user_input.isdigit():
         await update.message.reply_text("❌ ID пользователя должен быть числом. Попробуйте еще раз:")
         return SELECT_USER
@@ -388,7 +360,6 @@ async def select_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = int(user_input)
     context.user_data['target_user_id'] = user_id
     
-    # Создаем клавиатуру с действиями
     keyboard = [
         [InlineKeyboardButton("➕ Добавить сообщения", callback_data="add_messages")],
         [InlineKeyboardButton("➖ Убрать сообщения", callback_data="remove_messages")]
@@ -411,7 +382,6 @@ async def select_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
     action = query.data
     context.user_data['action'] = action
     
-    # Определяем текст в зависимости от действия
     action_text = "добавить" if action == "add_messages" else "убрать"
     
     await query.edit_message_text(
@@ -424,7 +394,6 @@ async def select_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def input_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_input = update.message.text.strip()
     
-    # Проверяем, является ли ввод числом
     if not user_input.isdigit():
         await update.message.reply_text("❌ Количество сообщений должно быть числом. Попробуйте еще раз:")
         return INPUT_AMOUNT
@@ -435,11 +404,9 @@ async def input_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
     today = datetime.utcnow().strftime("%Y-%m-%d")
     key = (target_user_id, today)
     
-    # Инициализируем счетчик бонусных сообщений, если его еще нет
     if key not in user_bonus_messages:
         user_bonus_messages[key] = 0
     
-    # Выполняем действие
     if action == "add_messages":
         user_bonus_messages[key] += amount
         action_result = "добавлены"
@@ -447,15 +414,11 @@ async def input_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_bonus_messages[key] = max(0, user_bonus_messages[key] - amount)
         action_result = "убраны"
     
-    # Получаем текущее значение бонусных сообщений
     current_bonus = user_bonus_messages[key]
-    
-    # Рассчитываем общий лимит для пользователя
     base_limit = 35
     referral_bonus = user_referrals.get(target_user_id, 0) * 3
     total_limit = base_limit + referral_bonus + current_bonus
     
-    # Формируем отчет
     report = (
         f"✅ Успешно!\n\n"
         f"• Пользователь ID: {target_user_id}\n"
@@ -465,8 +428,6 @@ async def input_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     
     await update.message.reply_text(report)
-    
-    # Завершаем диалог
     return ConversationHandler.END
 
 # Отмена диалога разработчика
@@ -484,25 +445,25 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not message.text:
         return
     
-    # Проверка условий активации для групповых чатов
+    # Улучшенная обработка групповых чатов
+    bot_username = (await context.bot.get_me()).username
+    is_private = message.chat.type == "private"
+    is_unlimited = chat_id == UNLIMITED_CHAT_ID
     is_reply_to_bot = (
         message.reply_to_message and 
-        message.reply_to_message.from_user.username and
-        message.reply_to_message.from_user.username.lower() == BOT_USERNAME.lstrip("@").lower()
+        message.reply_to_message.from_user.username == bot_username
     )
-    is_mention = BOT_USERNAME.lower() in message.text.lower()
+    is_mention = f"@{bot_username}" in message.text
     
-    # Для групповых чатов - пропускаем некорректные сообщения
-    if message.chat.type != "private":
-        if not (is_reply_to_bot or is_mention):
-            return
+    # Для групповых чатов реагируем только на ответы боту или упоминания
+    if not is_private and not (is_reply_to_bot or is_mention):
+        return
     
-    # Проверка лимита сообщений (кроме безлимитного чата)
-    if chat_id != UNLIMITED_CHAT_ID:
+    # Проверка лимита сообщений
+    if not is_unlimited and not is_private:
         if not check_message_limit(user.id):
             logger.warning(f"User {user.full_name} ({user.id}) exceeded daily message limit")
             
-            # Получаем текущие лимиты для информационного сообщения
             today = datetime.utcnow().strftime("%Y-%m-%d")
             user_key = (user.id, today)
             
@@ -522,7 +483,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     logger.info(f"Обработка сообщения от {user.full_name} в чате {chat_id}: {message.text}")
     
-    # Отправляем статус "печатает..."
     await context.bot.send_chat_action(chat_id=chat_id, action=constants.ChatAction.TYPING)
     
     try:
@@ -548,13 +508,20 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             history = history[-10:]
         
         user_contexts[key] = history
-        await message.reply_text(cleaned_response)
+        
+        # Экранирование Markdown и отправка с форматированием
+        try:
+            escaped_response = escape_markdown(cleaned_response)
+            await message.reply_text(escaped_response, parse_mode="MarkdownV2")
+        except Exception as e:
+            logger.error(f"Markdown error: {e}, sending as plain text")
+            await message.reply_text(cleaned_response)
+            
     except Exception as e:
         logger.error(f"Ошибка обработки сообщения: {e}")
         await message.reply_text("Что-то пошло не так. Попробуйте еще раз.")
 
 async def post_init(application: Application) -> None:
-    """Устанавливаем меню команд при запуске бота"""
     commands = [
         BotCommand("start", "Начало работы с ботом"),
         BotCommand("info", "Информация о боте и правила использования"),
@@ -581,7 +548,6 @@ def main():
     logger.info("Ожидание 45 секунд перед запуском бота...")
     time.sleep(45)
 
-    # Создаем приложение с обработчиком post_init
     application = Application.builder().token(TOKEN).post_init(post_init).build()
     
     # Регистрация обработчиков команд
