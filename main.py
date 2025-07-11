@@ -5,6 +5,7 @@ import threading
 import time
 import re
 import random
+import json
 from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from openai import OpenAI
@@ -13,8 +14,6 @@ from telegram import (
     InlineKeyboardButton, 
     InlineKeyboardMarkup, 
     BotCommand,
-    ReplyKeyboardMarkup,
-    ReplyKeyboardRemove,
     constants
 )
 from telegram.ext import (
@@ -37,7 +36,7 @@ logger = logging.getLogger(__name__)
 # Загрузка конфигурации
 TOKEN = os.getenv("TG_TOKEN")
 NOVITA_API_KEY = os.getenv("NOVITA_API_KEY")
-BOT_USERNAME = os.getenv("BOT_USERNAME", "@aliceneyrobot")  # Исправлено: получение из переменных окружения
+BOT_USERNAME = os.getenv("BOT_USERNAME", "@aliceneyrobot")
 
 # Идентификатор разработчика
 DEVELOPER_ID = 1040929628
@@ -56,8 +55,40 @@ user_referrals = {}         # Формат: {referrer_id: count}
 user_invited_by = {}        # Формат: {invited_user_id: referrer_id}
 last_cleanup_time = time.time()
 
+# Путь к файлу реферальных данных
+REF_DATA_FILE = "ref_data.json"
+
 # Список эмодзи для использования
 EMOJI_LIST = ["😊", "😂", "😍", "🤔", "😎", "👍", "❤️", "✨", "🎉", "💔"]
+
+# Загрузка реферальных данных
+def load_ref_data():
+    global user_referrals, user_invited_by
+    try:
+        if os.path.exists(REF_DATA_FILE):
+            with open(REF_DATA_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                user_referrals = data.get("user_referrals", {})
+                user_invited_by = data.get("user_invited_by", {})
+                # Преобразование ключей в int (JSON сохраняет ключи как строки)
+                user_referrals = {int(k): v for k, v in user_referrals.items()}
+                user_invited_by = {int(k): int(v) for k, v in user_invited_by.items()}
+            logger.info("Ref data loaded successfully")
+    except Exception as e:
+        logger.error(f"Error loading ref data: {e}")
+
+# Сохранение реферальных данных
+def save_ref_data():
+    try:
+        data = {
+            "user_referrals": user_referrals,
+            "user_invited_by": user_invited_by
+        }
+        with open(REF_DATA_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        logger.info("Ref data saved successfully")
+    except Exception as e:
+        logger.error(f"Error saving ref data: {e}")
 
 # Загрузка персонажа
 try:
@@ -150,15 +181,10 @@ def check_message_limit(user_id: int) -> bool:
     logger.info(f"User {user_id} message count: {daily_message_counters[key]}/{total_limit} (base: {base_limit}, referrals: {referral_bonus}, bonus: {bonus_messages})")
     return True
 
-# Функция для экранирования Markdown символов
-def escape_markdown(text: str) -> str:
-    escape_chars = r'\_*[]()~`>#+-=|{}.!'
-    return re.sub(f'([{re.escape(escape_chars)}])', r'\\\1', text)
-
 # Функция для форматирования действий
 def format_actions(text: str) -> str:
-    # Экранируем все символы, кроме звездочек для действий
-    return re.sub(r'\*(.*?)\*', r'\1', text)
+    # Просто оставляем действия в формате *действие*
+    return text
 
 # Функция для добавления эмодзи
 def add_emojis(text: str) -> str:
@@ -255,6 +281,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             user_invited_by[user.id] = referrer_id
             user_referrals[referrer_id] = user_referrals.get(referrer_id, 0) + 1
             logger.info(f"New referral: user {user.id} invited by {referrer_id}")
+            save_ref_data()  # Сохраняем изменения
     
     await update.message.reply_text(
         "Привет, меня зовут Алиса, если посмеешь относиться ко мне неуважительно то получишь пару крепких ударов!\n\n"
@@ -456,10 +483,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     is_mention = f"@{bot_username}" in message.text
     
     # Для групповых чатов реагируем только на ответы боту или упоминания
-    if not is_private and not (is_reply_to_bot or is_mention):
+    if not is_private and not is_unlimited and not (is_reply_to_bot or is_mention):
         return
     
-    # Проверка лимита сообщений
+    # Проверка лимита сообщений (только для обычных чатов)
     if not is_unlimited and not is_private:
         if not check_message_limit(user.id):
             logger.warning(f"User {user.full_name} ({user.id}) exceeded daily message limit")
@@ -509,13 +536,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         user_contexts[key] = history
         
-        # Экранирование Markdown и отправка с форматированием
-        try:
-            escaped_response = escape_markdown(cleaned_response)
-            await message.reply_text(escaped_response, parse_mode="MarkdownV2")
-        except Exception as e:
-            logger.error(f"Markdown error: {e}, sending as plain text")
-            await message.reply_text(cleaned_response)
+        # Отправляем ответ без форматирования Markdown
+        await message.reply_text(cleaned_response)
             
     except Exception as e:
         logger.error(f"Ошибка обработки сообщения: {e}")
@@ -539,6 +561,9 @@ def main():
     if not NOVITA_API_KEY:
         logger.error("NOVITA_API_KEY environment variable is missing!")
         return
+
+    # Загружаем реферальные данные
+    load_ref_data()
 
     # Запуск HTTP-сервера
     port = int(os.getenv('PORT', 8080))
