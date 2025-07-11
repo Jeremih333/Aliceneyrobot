@@ -476,14 +476,24 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     bot_username = (await context.bot.get_me()).username
     is_private = message.chat.type == "private"
     is_unlimited = chat_id == UNLIMITED_CHAT_ID
+    bot_mention = f"@{bot_username}"
+    
+    # Проверка, является ли сообщение адресованным боту
     is_reply_to_bot = (
         message.reply_to_message and 
         message.reply_to_message.from_user.username == bot_username
     )
-    is_mention = f"@{bot_username}" in message.text
+    is_mention = bot_mention in message.text
+    is_bot_name_in_text = bot_username in message.text.lower()
     
-    # Для групповых чатов реагируем только на ответы боту или упоминания
-    if not is_private and not is_unlimited and not (is_reply_to_bot or is_mention):
+    # Для групповых чатов реагируем только на:
+    # 1. Ответы на сообщения бота
+    # 2. Сообщения с упоминанием бота (@username)
+    # 3. Сообщения с именем бота в тексте (без @)
+    is_addressed_to_bot = is_reply_to_bot or is_mention or is_bot_name_in_text
+    
+    # В групповых чатах (не приватных) игнорируем сообщения не адресованные боту
+    if not is_private and not is_addressed_to_bot:
         return
     
     # Проверка лимита сообщений (только для обычных чатов)
