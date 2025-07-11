@@ -12,7 +12,10 @@ from telegram import (
     Update, 
     InlineKeyboardButton, 
     InlineKeyboardMarkup, 
-    BotCommand
+    BotCommand,
+    ReplyKeyboardMarkup,
+    ReplyKeyboardRemove,
+    constants
 )
 from telegram.ext import (
     Application,
@@ -45,11 +48,10 @@ UNLIMITED_CHAT_ID = -1001481824277
 # Глобальные переменные
 user_contexts = {}
 daily_message_counters = {}  # Формат: {(user_id, date): count}
-unlimited_users = {}  # Пользователи с безлимитом: {user_id: date}
+user_bonus_messages = {}    # Формат: {(user_id, date): bonus_count}
+user_referrals = {}         # Формат: {referrer_id: count}
+user_invited_by = {}        # Формат: {invited_user_id: referrer_id}
 last_cleanup_time = time.time()
-
-# Состояния для ConversationHandler разработчика
-SELECT_USER, SELECT_ACTION, INPUT_AMOUNT = range(3)
 
 # Список эмодзи для использования
 EMOJI_LIST = ["😊", "😂", "😍", "🤔", "😎", "👍", "❤️", "✨", "🎉", "💔"]
@@ -74,38 +76,34 @@ except Exception as e:
 
 # Функция очистки устаревших счетчиков
 def cleanup_old_counters():
-    global daily_message_counters, unlimited_users, last_cleanup_time
+    global daily_message_counters, user_bonus_messages, last_cleanup_time
     current_time = time.time()
-    today = datetime.utcnow().date()
     
     # Проверяем каждые 30 минут
     if current_time - last_cleanup_time > 1800:
-        logger.info("Starting cleanup of old data")
+        logger.info("Starting cleanup of old message counters")
+        today = datetime.utcnow().date()
         keys_to_delete = []
         
-        # Удаляем старые счетчики сообщений
-        for key in daily_message_counters.keys():
+        # Очистка daily_message_counters
+        for key in list(daily_message_counters.keys()):
             _, date_str = key
             record_date = datetime.strptime(date_str, "%Y-%m-%d").date()
             if (today - record_date).days > 1:
                 keys_to_delete.append(key)
+                del daily_message_counters[key]
         
-        for key in keys_to_delete:
-            del daily_message_counters[key]
-            logger.debug(f"Removed old counter: {key}")
-        
-        # Удаляем устаревшие безлимитные записи
-        users_to_remove = []
-        for user_id, unlimited_date in unlimited_users.items():
-            if (today - unlimited_date).days > 0:
-                users_to_remove.append(user_id)
-        
-        for user_id in users_to_remove:
-            del unlimited_users[user_id]
-            logger.debug(f"Removed unlimited status for user: {user_id}")
+        # Очистка user_bonus_messages
+        for key in list(user_bonus_messages.keys()):
+            _, date_str = key
+            record_date = datetime.strptime(date_str, "%Y-%m-%d").date()
+            if (today - record_date).days > 1:
+                if key not in keys_to_delete:
+                    keys_to_delete.append(key)
+                del user_bonus_messages[key]
         
         last_cleanup_time = current_time
-        logger.info(f"Cleanup completed. Removed {len(keys_to_delete)} old counters and {len(users_to_remove)} unlimited users")
+        logger.info(f"Cleanup completed. Removed {len(keys_to_delete)} old counters")
 
 # Функция проверки лимита сообщений
 def check_message_limit(user_id: int) -> bool:
@@ -115,21 +113,29 @@ def check_message_limit(user_id: int) -> bool:
     # Очистка старых записей перед проверкой
     cleanup_old_counters()
     
-    # Проверяем безлимитный статус
-    if user_id in unlimited_users:
-        return True
+    # Базовый лимит
+    base_limit = 35
+    
+    # Бонус за рефералов
+    referral_bonus = user_referrals.get(user_id, 0) * 3
+    
+    # Бонусные сообщения от разработчика
+    bonus_messages = user_bonus_messages.get(key, 0)
+    
+    # Общий доступный лимит
+    total_limit = base_limit + referral_bonus + bonus_messages
     
     # Инициализация счетчика
     if key not in daily_message_counters:
         daily_message_counters[key] = 0
     
     # Проверка лимита
-    if daily_message_counters[key] >= 35:
+    if daily_message_counters[key] >= total_limit:
         return False
     
     # Увеличение счетчика
     daily_message_counters[key] += 1
-    logger.info(f"User {user_id} message count: {daily_message_counters[key]}/35")
+    logger.info(f"User {user_id} message count: {daily_message_counters[key]}/{total_limit} (base: {base_limit}, referrals: {referral_bonus}, bonus: {bonus_messages})")
     return True
 
 # Функция для форматирования действий (без обратных кавычек)
@@ -245,11 +251,26 @@ def query_chat(messages: list) -> str:
 
 # Обработчики команд
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.message.from_user
+    
+    # Обработка реферальной ссылки
+    if context.args and context.args[0].isdigit():
+        referrer_id = int(context.args[0])
+        
+        # Проверка чтобы пользователь не пригласил сам себя
+        if referrer_id != user.id:
+            # Регистрируем реферала только один раз
+            if user.id not in user_invited_by:
+                user_invited_by[user.id] = referrer_id
+                user_referrals[referrer_id] = user_referrals.get(referrer_id, 0) + 1
+                logger.info(f"New referral: user {user.id} invited by {referrer_id}")
+    
     # Обновленное приветственное сообщение
     await update.message.reply_text(
         "Привет, меня зовут Алиса, если посмеешь относиться ко мне неуважительно то получишь пару крепких ударов!\n\n"
         "/info - информация обо мне и как правильно ко мне обращаться.\n"
-        "/stat - узнать свой статус и оставшиеся сообщения"
+        "/stat - узнать свой статус и оставшиеся сообщения\n"
+        "/ref - ваша реферальная программа"
     )
 
 async def info(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -263,6 +284,22 @@ async def info(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "❗️Здесь вы можете ознакомиться с правилами использования нашего бота.\n"
         "Рекомендуем прочитать перед использованием.",
         reply_markup=reply_markup
+    )
+
+async def ref_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик команды /ref - реферальная программа"""
+    user = update.message.from_user
+    bot_username = (await context.bot.get_me()).username
+    ref_link = f"https://t.me/{bot_username}?start={user.id}"
+    count = user_referrals.get(user.id, 0)
+    
+    await update.message.reply_text(
+        f"👥 <b>Ваша реферальная программа</b>\n\n"
+        f"• Ваша ссылка: <code>{ref_link}</code>\n"
+        f"• Приглашено пользователей: {count}\n"
+        f"• Каждый приглашенный пользователь увеличивает ваш дневной лимит на +3 сообщения\n\n"
+        f"Поделитесь своей ссылкой с друзьями, чтобы увеличить количество доступных сообщений!",
+        parse_mode="HTML"
     )
 
 async def clear_context(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -290,48 +327,31 @@ async def stat(update: Update, context: ContextTypes.DEFAULT_TYPE):
             has_context = True
             break
     
-    # Проверяем безлимитный статус
-    if user.id in unlimited_users:
-        remaining_text = "♾️"
-    else:
-        # Получаем количество использованных сообщений
-        used_messages = daily_message_counters.get(key, 0)
-        remaining = max(0, 35 - used_messages)
-        remaining_text = f"{remaining}/35"
+    # Получаем количество использованных сообщений
+    used_messages = daily_message_counters.get(key, 0)
+    
+    # Рассчитываем лимиты
+    base_limit = 35
+    referral_bonus = user_referrals.get(user.id, 0) * 3
+    bonus_messages = user_bonus_messages.get(key, 0)
+    total_limit = base_limit + referral_bonus + bonus_messages
+    remaining = max(0, total_limit - used_messages)
     
     # Формируем сообщение
     message = (
         f"📊 <b>Ваш статус:</b>\n\n"
-        f"• Осталось сообщений сегодня: <b>{remaining_text}</b>\n"
+        f"• Базовый лимит: {base_limit}\n"
+        f"• Бонус за рефералов: +{referral_bonus} (приглашено: {user_referrals.get(user.id, 0)})\n"
+        f"• Бонусные сообщения: +{bonus_messages}\n"
+        f"• Итого доступно: <b>{total_limit}</b>\n"
+        f"• Использовано: {used_messages}\n"
+        f"• Осталось: <b>{remaining}</b>\n\n"
         f"• История диалога: {'сохранена' if has_context else 'отсутствует'}\n\n"
-        f"💡 Для сброса истории используйте /clear"
+        f"💡 Для сброса истории используйте /clear\n"
+        f"👥 Приглашайте друзей: /ref"
     )
     
     await update.message.reply_text(message, parse_mode="HTML")
-
-# Получение статистики пользователя по ID
-def get_user_stat(user_id: int) -> str:
-    today = datetime.utcnow().strftime("%Y-%m-%d")
-    key = (user_id, today)
-    
-    # Проверяем безлимитный статус
-    if user_id in unlimited_users:
-        remaining_text = "♾️"
-    else:
-        # Получаем количество использованных сообщений
-        used_messages = daily_message_counters.get(key, 0)
-        remaining = max(0, 35 - used_messages)
-        remaining_text = f"{remaining}/35"
-    
-    # Проверяем наличие истории диалога
-    has_context = any(ctx_key[1] == user_id for ctx_key in user_contexts.keys())
-    
-    # Формируем статистику
-    return (
-        f"👤 <b>Статистика пользователя ID {user_id}:</b>\n\n"
-        f"• Осталось сообщений сегодня: <b>{remaining_text}</b>\n"
-        f"• История диалога: {'сохранена' if has_context else 'отсутствует'}\n"
-    )
 
 # Обработчик команды /dev (только для разработчика)
 async def dev(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -342,7 +362,7 @@ async def dev(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if user.id != DEVELOPER_ID:
         logger.warning(f"User {user.id} tried to access dev command")
         await update.message.reply_text("У вас нет прав для использования этой команды.")
-        return ConversationHandler.END
+        return
     
     # Запрашиваем ID пользователя
     await update.message.reply_text(
@@ -365,22 +385,17 @@ async def select_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = int(user_input)
     context.user_data['target_user_id'] = user_id
     
-    # Показываем статистику пользователя
-    user_stat = get_user_stat(user_id)
-    
     # Создаем клавиатуру с действиями
     keyboard = [
         [InlineKeyboardButton("➕ Добавить сообщения", callback_data="add_messages")],
-        [InlineKeyboardButton("➖ Убрать сообщения", callback_data="remove_messages")],
-        [InlineKeyboardButton("♾️ Включить безлимит", callback_data="set_unlimited")],
-        [InlineKeyboardButton("🚫 Выключить безлимит", callback_data="remove_unlimited")]
+        [InlineKeyboardButton("➖ Убрать сообщения", callback_data="remove_messages")]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     
     await update.message.reply_text(
-        f"{user_stat}\nВыберите действие:",
-        reply_markup=reply_markup,
-        parse_mode="HTML"
+        f"👤 Выбран пользователь с ID: {user_id}\n"
+        "Выберите действие:",
+        reply_markup=reply_markup
     )
     
     return SELECT_ACTION
@@ -393,37 +408,11 @@ async def select_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
     action = query.data
     context.user_data['action'] = action
     
-    # Для специальных действий обрабатываем сразу
-    if action in ["set_unlimited", "remove_unlimited"]:
-        target_user_id = context.user_data['target_user_id']
-        today = datetime.utcnow().date()
-        
-        if action == "set_unlimited":
-            unlimited_users[target_user_id] = today
-            action_result = "безлимит включен ♾️"
-        else:
-            if target_user_id in unlimited_users:
-                del unlimited_users[target_user_id]
-                action_result = "безлимит выключен 🚫"
-            else:
-                action_result = "безлимит уже выключен 🚫"
-        
-        # Формируем отчет
-        report = (
-            f"✅ Успешно!\n\n"
-            f"• Пользователь ID: {target_user_id}\n"
-            f"• Действие: {action_result}\n\n"
-            f"{get_user_stat(target_user_id)}"
-        )
-        
-        await query.edit_message_text(report, parse_mode="HTML")
-        return ConversationHandler.END
-    
-    # Для обычных действий запрашиваем количество
+    # Определяем текст в зависимости от действия
     action_text = "добавить" if action == "add_messages" else "убрать"
     
     await query.edit_message_text(
-        f"✏️ Введите количество сообщений для {action_text} или отправьте ♾️ для безлимита:"
+        f"✏️ Введите количество сообщений для {action_text}:"
     )
     
     return INPUT_AMOUNT
@@ -431,52 +420,48 @@ async def select_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # Обработка ввода количества сообщений
 async def input_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_input = update.message.text.strip()
+    
+    # Проверяем, является ли ввод числом
+    if not user_input.isdigit():
+        await update.message.reply_text("❌ Количество сообщений должно быть числом. Попробуйте еще раз:")
+        return INPUT_AMOUNT
+    
+    amount = int(user_input)
     target_user_id = context.user_data['target_user_id']
     action = context.user_data['action']
     today = datetime.utcnow().strftime("%Y-%m-%d")
     key = (target_user_id, today)
     
-    # Обработка специальных эмодзи
-    if user_input == "♾️":
-        # Включаем безлимит
-        unlimited_users[target_user_id] = datetime.utcnow().date()
-        action_result = "безлимит включен ♾️"
-    elif user_input == "🚫":
-        # Выключаем безлимит
-        if target_user_id in unlimited_users:
-            del unlimited_users[target_user_id]
-            action_result = "безлимит выключен 🚫"
-        else:
-            action_result = "безлимит уже выключен 🚫"
+    # Инициализируем счетчик бонусных сообщений, если его еще нет
+    if key not in user_bonus_messages:
+        user_bonus_messages[key] = 0
+    
+    # Выполняем действие
+    if action == "add_messages":
+        user_bonus_messages[key] += amount
+        action_result = "добавлены"
     else:
-        # Обработка числового ввода
-        if not user_input.isdigit():
-            await update.message.reply_text("❌ Количество сообщений должно быть числом или эмодзи ♾️/🚫. Попробуйте еще раз:")
-            return INPUT_AMOUNT
-        
-        amount = int(user_input)
-        
-        # Инициализируем счетчик, если его еще нет
-        if key not in daily_message_counters:
-            daily_message_counters[key] = 0
-        
-        # Выполняем действие
-        if action == "add_messages":
-            daily_message_counters[key] = max(0, daily_message_counters[key] - amount)
-            action_result = f"добавлено {amount} сообщений"
-        else:
-            daily_message_counters[key] += amount
-            action_result = f"убрано {amount} сообщений"
+        user_bonus_messages[key] = max(0, user_bonus_messages[key] - amount)
+        action_result = "убраны"
+    
+    # Получаем текущее значение бонусных сообщений
+    current_bonus = user_bonus_messages[key]
+    
+    # Рассчитываем общий лимит для пользователя
+    base_limit = 35
+    referral_bonus = user_referrals.get(target_user_id, 0) * 3
+    total_limit = base_limit + referral_bonus + current_bonus
     
     # Формируем отчет
     report = (
         f"✅ Успешно!\n\n"
         f"• Пользователь ID: {target_user_id}\n"
-        f"• Действие: {action_result}\n\n"
-        f"{get_user_stat(target_user_id)}"
+        f"• Действие: {action_result} {amount} бонусных сообщений\n"
+        f"• Текущие бонусные сообщения: {current_bonus}\n"
+        f"• Общий доступный лимит: {total_limit} ({base_limit} базовых + {referral_bonus} реферальных + {current_bonus} бонусных)"
     )
     
-    await update.message.reply_text(report, parse_mode="HTML")
+    await update.message.reply_text(report)
     
     # Завершаем диалог
     return ConversationHandler.END
@@ -513,14 +498,29 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if chat_id != UNLIMITED_CHAT_ID:
         if not check_message_limit(user.id):
             logger.warning(f"User {user.full_name} ({user.id}) exceeded daily message limit")
+            
+            # Получаем текущие лимиты для информационного сообщения
+            today = datetime.utcnow().strftime("%Y-%m-%d")
+            user_key = (user.id, today)
+            
+            base_limit = 35
+            referral_bonus = user_referrals.get(user.id, 0) * 3
+            bonus_messages = user_bonus_messages.get(user_key, 0)
+            total_limit = base_limit + referral_bonus + bonus_messages
+            
             await message.reply_text(
-                "❗️Вы достигли ежедневного лимита на общение с Алисой в 35 сообщений в день, "
-                "возвращайтесь завтра или продолжите безлимитно ей пользоваться в чате - "
-                "https://t.me/freedom346"
+                f"❗️Вы достигли ежедневного лимита на общение с Алисой ({total_limit} сообщений).\n"
+                "Возвращайтесь завтра или продолжите безлимитно ей пользоваться в чате - "
+                "https://t.me/freedom346\n\n"
+                "Или вы можете увеличить число ваших дневных запросов, если пригласите людей по вашей реферальной ссылке.\n"
+                "/ref - узнать подробнее."
             )
             return
     
     logger.info(f"Обработка сообщения от {user.full_name} в чате {chat_id}: {message.text}")
+    
+    # Отправляем статус "печатает..."
+    await context.bot.send_chat_action(chat_id=chat_id, action=constants.ChatAction.TYPING)
     
     try:
         history = user_contexts.get(key, [])
@@ -556,7 +556,8 @@ async def post_init(application: Application) -> None:
         BotCommand("start", "Начало работы с ботом"),
         BotCommand("info", "Информация о боте и правила использования"),
         BotCommand("clear", "Очистить историю диалога"),
-        BotCommand("stat", "Статус и оставшиеся сообщения")
+        BotCommand("stat", "Статус и оставшиеся сообщения"),
+        BotCommand("ref", "Реферальная программа")
     ]
     await application.bot.set_my_commands(commands)
     logger.info("Меню команд бота установлено")
@@ -583,6 +584,7 @@ def main():
     # Регистрация обработчиков команд
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("info", info))
+    application.add_handler(CommandHandler("ref", ref_command))
     application.add_handler(CommandHandler("clear", clear_context))
     application.add_handler(CommandHandler("stat", stat))
     
