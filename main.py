@@ -45,6 +45,9 @@ DEVELOPER_ID = 1040929628
 # Идентификатор чата без ограничений
 UNLIMITED_CHAT_ID = -1001481824277
 
+# Состояния для ConversationHandler разработчика
+SELECT_USER, SELECT_ACTION, INPUT_AMOUNT = range(3)
+
 # Глобальные переменные
 user_contexts = {}
 daily_message_counters = {}  # Формат: {(user_id, date): count}
