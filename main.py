@@ -176,9 +176,6 @@ def check_message_limit(user_id: int) -> bool:
     if daily_message_counters[key] >= total_limit:
         return False
     
-    # Увеличение счетчика
-    daily_message_counters[key] += 1
-    logger.info(f"User {user_id} message count: {daily_message_counters[key]}/{total_limit} (base: {base_limit}, referrals: {referral_bonus}, bonus: {bonus_messages})")
     return True
 
 # Функция для форматирования действий
@@ -308,11 +305,20 @@ async def ref_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ref_link = f"https://t.me/{bot_username}?start={user.id}"
     count = user_referrals.get(user.id, 0)
     
+    # Рассчитать общий доступный лимит для пользователя
+    today = datetime.utcnow().strftime("%Y-%m-%d")
+    key = (user.id, today)
+    base_limit = 35
+    referral_bonus = count * 3
+    bonus_messages = user_bonus_messages.get(key, 0)
+    total_limit = base_limit + referral_bonus + bonus_messages
+    
     await update.message.reply_text(
         f"👥 <b>Ваша реферальная программа</b>\n\n"
         f"• Ваша ссылка: <code>{ref_link}</code>\n"
         f"• Приглашено пользователей: {count}\n"
-        f"• Каждый приглашенный пользователь увеличивает ваш дневной лимит на +3 сообщения\n\n"
+        f"• Каждый приглашенный пользователь увеличивает ваш дневной лимит на +3 сообщения\n"
+        f"• Текущий доступный лимит: <b>{total_limit}</b> сообщений в день\n\n"
         f"Поделитесь своей ссылкой с друзьями, чтобы увеличить количество доступных сообщений!",
         parse_mode="HTML"
     )
@@ -339,15 +345,22 @@ async def stat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     used_messages = daily_message_counters.get(key, 0)
     
     base_limit = 35
-    referral_bonus = user_referrals.get(user.id, 0) * 3
+    referral_count = user_referrals.get(user.id, 0)
+    referral_bonus = referral_count * 3
     bonus_messages = user_bonus_messages.get(key, 0)
     total_limit = base_limit + referral_bonus + bonus_messages
     remaining = max(0, total_limit - used_messages)
     
+    # Проверяем, является ли чат безлимитным
+    is_unlimited = update.message.chat_id == UNLIMITED_CHAT_ID
+    
+    unlimited_info = "\n• Вы находитесь в безлимитном чате" if is_unlimited else ""
+    
     message = (
-        f"📊 <b>Ваш статус:</b>\n\n"
+        f"📊 <b>Ваш статус:</b>\n"
+        f"{unlimited_info}\n\n"
         f"• Базовый лимит: {base_limit}\n"
-        f"• Бонус за рефералов: +{referral_bonus} (приглашено: {user_referrals.get(user.id, 0)})\n"
+        f"• Бонус за рефералов: +{referral_bonus} (приглашено: {referral_count})\n"
         f"• Бонусные сообщения: +{bonus_messages}\n"
         f"• Итого доступно: <b>{total_limit}</b>\n"
         f"• Использовано: {used_messages}\n"
@@ -497,7 +510,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     # Проверка лимита сообщений (только для обычных чатов)
-    if not is_unlimited and not is_private:
+    if not is_unlimited:
+        # Проверяем лимит перед увеличением счетчика
         if not check_message_limit(user.id):
             logger.warning(f"User {user.full_name} ({user.id}) exceeded daily message limit")
             
@@ -517,6 +531,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "/ref - узнать подробнее."
             )
             return
+        
+        # Увеличиваем счетчик сообщений только если лимит не превышен
+        today = datetime.utcnow().strftime("%Y-%m-%d")
+        counter_key = (user.id, today)
+        daily_message_counters[counter_key] = daily_message_counters.get(counter_key, 0) + 1
     
     logger.info(f"Обработка сообщения от {user.full_name} в чате {chat_id}: {message.text}")
     
